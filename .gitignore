@@ -1,0 +1,10 @@
+.venv/
+llama-3-8b/
+SinLlama_v01/
+SinLlama_merged/
+sinllama_compact_lora_r16_cpu/
+sinllama_merged_fp32_cpu/
+projects/unsloth_compiled_cache/
+
+.env
+*.txt
