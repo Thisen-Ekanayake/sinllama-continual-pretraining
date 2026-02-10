@@ -8,3 +8,4 @@ projects/unsloth_compiled_cache/
 
 .env
 *.txt
+*.pt
