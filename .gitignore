@@ -13,3 +13,5 @@ OASST2/
 *.pt
 *.json
 *.jsonl
+
+!requirements.txt
