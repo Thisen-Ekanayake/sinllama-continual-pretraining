@@ -1,5 +1,6 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# Remove or comment out the line that disables CUDA
+# os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import torch
 import numpy as np
@@ -15,8 +16,10 @@ VAL_TEXT_FILE = "./eval.txt"
 OUTPUT_FILE = "./column_importance.pt"
 MAX_LENGTH = 128
 
+# Set default dtype and device for GPU
 torch.set_default_dtype(torch.float32)
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 # -----------------------------
 # Load model & tokenizer
@@ -24,8 +27,8 @@ device = torch.device("cpu")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
-    device_map={"": "cpu"},
-    torch_dtype=torch.float32,
+    device_map="auto",
+    torch_dtype=torch.float16,
     low_cpu_mem_usage=True,
 )
 model.eval()
@@ -37,31 +40,42 @@ with open(VAL_TEXT_FILE, "r", encoding="utf-8") as f:
     texts = [l.strip() for l in f if l.strip()]
 
 # -----------------------------
-# Storage
+# Storage - use regular dict instead of defaultdict
 # -----------------------------
-column_importance = defaultdict(lambda: None)
-counts = defaultdict(int)
+column_importance = {}
+counts = {}
 
 # -----------------------------
 # Hook
 # -----------------------------
-def make_hook(name, weight):
+def make_hook(name):
     def hook(module, inp, out):
-        x = inp[0].detach().cpu()
+        # Skip if weight is on meta device (offloaded)
+        if module.weight.device.type == 'meta':
+            return
+        
+        x = inp[0].detach()
         if x.dim() == 3:
             col_scale = x.abs().mean(dim=(0, 1))
         else:
             col_scale = x.abs().mean(dim=0)
 
-        W = weight.detach().cpu().abs()
+        # Get weight and ensure it's on the same device as input
+        W = module.weight.detach().abs()
+        if W.device != col_scale.device:
+            W = W.to(col_scale.device)
+            
         imp = (W * col_scale.unsqueeze(0)).sum(dim=0)
 
-        if column_importance[name] is None:
+        # Move to CPU for storage to save GPU memory
+        imp = imp.cpu()
+        
+        if name not in column_importance:
             column_importance[name] = imp.clone()
+            counts[name] = 1
         else:
             column_importance[name] += imp
-
-        counts[name] += 1
+            counts[name] += 1
     return hook
 
 # -----------------------------
@@ -71,7 +85,7 @@ hooks = []
 for name, module in model.named_modules():
     if ("mlp" in name or "self_attn" in name) and isinstance(module, torch.nn.Linear):
         hooks.append(
-            module.register_forward_hook(make_hook(name, module.weight))
+            module.register_forward_hook(make_hook(name))
         )
 
 # -----------------------------
