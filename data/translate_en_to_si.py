@@ -44,13 +44,33 @@ def translate_text(text, api_key):
         raise RuntimeError(f"Unexpected translation response: {payload}")
 
 
+def count_existing_lines(filepath):
+    """
+    Count how many lines already exist in the output file.
+    """
+    if not os.path.exists(filepath):
+        return 0
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        return sum(1 for _ in f)
+
+
 def main():
-    total = 0
+    # Determine resume point
+    processed_lines = count_existing_lines(OUTPUT_FILE)
+    print(f"Resuming from line: {processed_lines}")
+
+    total = processed_lines
+    current_line = 0
 
     with open(INPUT_FILE, "r", encoding="utf-8") as f_in, \
-         open(OUTPUT_FILE, "w", encoding="utf-8") as f_out:
+         open(OUTPUT_FILE, "a", encoding="utf-8") as f_out:
 
         for line in f_in:
+            if current_line < processed_lines:
+                current_line += 1
+                continue
+
             obj = json.loads(line)
 
             # Translate each message content
@@ -60,10 +80,7 @@ def main():
                 try:
                     translated = translate_text(original_text, API_KEY)
                     msg["content"] = translated
-
-                    # Optional small delay to avoid rate spikes
-                    time.sleep(0.1)
-
+                    time.sleep(0.1)  # prevent rate spikes
                 except Exception as e:
                     print(f"Translation error: {e}")
                     print("Keeping original text.")
@@ -73,10 +90,12 @@ def main():
             f_out.write("\n")
 
             total += 1
+            current_line += 1
+
             if total % 50 == 0:
                 print(f"Processed {total} conversations")
 
-    print(f"Finished. Translated {total} conversations.")
+    print(f"Finished. Total translated conversations: {total}")
 
 
 if __name__ == "__main__":
