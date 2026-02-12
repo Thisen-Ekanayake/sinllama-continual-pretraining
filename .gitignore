@@ -6,7 +6,10 @@ SinLlama_merged_bf16/
 sinllama_compact_lora_r16_cpu/
 sinllama_merged_fp32_cpu/
 projects/unsloth_compiled_cache/
+OASST2/
 
 .env
 *.txt
 *.pt
+*.json
+*.jsonl
