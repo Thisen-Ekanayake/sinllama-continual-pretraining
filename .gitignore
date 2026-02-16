@@ -13,5 +13,6 @@ OASST2/
 *.pt
 *.json
 *.jsonl
+*.tar*
 
 !requirements.txt
