@@ -22,8 +22,8 @@ TXT_PATH   = os.environ.get("TXT_PATH", "/workspace/data/All-Text_8696658_147190
 OUT_DIR    = os.environ.get("OUT_DIR", "/workspace/sinllama_lora_cpt")
 
 SEQ_LEN    = int(os.environ.get("SEQ_LEN", 1024))
-MICRO_BS   = int(os.environ.get("MICRO_BS", 8))
-GRAD_ACC   = int(os.environ.get("GRAD_ACC", 2))
+MICRO_BS   = int(os.environ.get("MICRO_BS", 2))
+GRAD_ACC   = int(os.environ.get("GRAD_ACC", 4))
 
 LR         = float(os.environ.get("LR", 1.5e-4))
 WARMUP     = float(os.environ.get("WARMUP_RATIO", 0.02))
