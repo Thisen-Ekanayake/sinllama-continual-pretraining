@@ -17,7 +17,7 @@ from peft import LoraConfig, get_peft_model
 # CONFIG
 # ============================================================
 
-MODEL_PATH = os.environ.get("MODEL_PATH", "/workspace/models/SinLlama_merged_bf16")
+MODEL_PATH = os.environ.get("MODEL_PATH", "/workspace/model/SinLlama_merged_bf16")
 TXT_PATH   = os.environ.get("TXT_PATH", "/workspace/data/All-Text_8696658_147190824.normalized.txt")
 OUT_DIR    = os.environ.get("OUT_DIR", "/workspace/sinllama_lora_cpt")
 
