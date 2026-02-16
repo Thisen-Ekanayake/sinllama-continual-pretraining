@@ -21,7 +21,7 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "/workspace/models/SinLlama_merged_bf1
 TXT_PATH   = os.environ.get("TXT_PATH", "/workspace/data/All-Text_8696658_147190824.normalized.txt")
 OUT_DIR    = os.environ.get("OUT_DIR", "/workspace/sinllama_lora_cpt")
 
-SEQ_LEN    = int(os.environ.get("SEQ_LEN", 2048))
+SEQ_LEN    = int(os.environ.get("SEQ_LEN", 1024))
 MICRO_BS   = int(os.environ.get("MICRO_BS", 8))
 GRAD_ACC   = int(os.environ.get("GRAD_ACC", 2))
 
