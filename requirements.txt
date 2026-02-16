@@ -112,3 +112,4 @@ xformers==0.0.34
 xxhash==3.6.0
 yarl==1.22.0
 zipp==3.23.0
+wandb==0.25.0
