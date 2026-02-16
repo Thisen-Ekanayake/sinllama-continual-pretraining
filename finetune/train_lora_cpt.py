@@ -214,7 +214,6 @@ trainer = Trainer(
     eval_dataset=val_packed,
     data_collator=data_collator,
     callbacks=[PerplexityCallback()],
-    label_names=["labels"]
 )
 
 # ============================================================
