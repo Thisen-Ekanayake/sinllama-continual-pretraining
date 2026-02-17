@@ -29,7 +29,7 @@ GRAD_ACC    = int(os.environ.get("GRAD_ACC",  "4"))
 
 # Stage 1: embed warmup — higher LR, short run
 # Stage 2: LoRA+embeds  — lower LR, full run
-EPOCHS      = float(os.environ.get("EPOCHS", "0.5" if STAGE == 1 else "3.0"))
+EPOCHS      = float(os.environ.get("EPOCHS", "0.5" if STAGE == 1 else "1.0"))
 LR          = float(os.environ.get("LR",     "1e-4" if STAGE == 1 else "2e-5"))
 
 LORA_R      = int(os.environ.get("LORA_R",   "128"))
@@ -195,10 +195,10 @@ training_args = TrainingArguments(
     lr_scheduler_type="linear" if STAGE == 1 else "cosine",
     num_train_epochs=EPOCHS,
     logging_steps=50,
-    save_steps=500,
+    save_steps=1000,
     eval_strategy="steps",
-    eval_steps=500,
-    save_total_limit=3,
+    eval_steps=1000,
+    save_total_limit=2,
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
     greater_is_better=False,
