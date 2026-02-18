@@ -27,18 +27,21 @@ SEQ_LEN     = int(os.environ.get("SEQ_LEN",   "1024"))
 MICRO_BS    = int(os.environ.get("MICRO_BS",  "4"))
 GRAD_ACC    = int(os.environ.get("GRAD_ACC",  "4"))
 
-# Stage 1: embed warmup — higher LR, short run
-# Stage 2: LoRA+embeds  — lower LR, full run
+DATA_PERC   = float(os.environ.get("DATA_PERC", "0.2"))  # 0.2 = 20%
+
+# Stage 1: embed warmup
+# Stage 2: LoRA + embeds
 EPOCHS      = float(os.environ.get("EPOCHS", "0.5" if STAGE == 1 else "1.0"))
-LR          = float(os.environ.get("LR",     "1e-4" if STAGE == 1 else "2e-5"))
+LR          = float(os.environ.get("LR",     "1e-4" if STAGE == 1 else "5e-6"))
 
 LORA_R      = int(os.environ.get("LORA_R",   "128"))
-LORA_ALPHA  = LORA_R   # always keep alpha == r for CPT
+LORA_ALPHA  = LORA_R
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
 print(f"\n{'='*60}")
-print(f"  STAGE={STAGE} | LR={LR} | EPOCHS={EPOCHS} | SEQ={SEQ_LEN} | BS={MICRO_BS}x{GRAD_ACC}")
+print(f"STAGE={STAGE} | LR={LR} | EPOCHS={EPOCHS} | DATA={DATA_PERC*100:.1f}%")
+print(f"SEQ={SEQ_LEN} | BS={MICRO_BS}x{GRAD_ACC}")
 print(f"{'='*60}\n")
 
 # ============================================================
@@ -61,9 +64,9 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="cuda",
     attn_implementation="sdpa",
 )
+
 model.config.use_cache = False
 
-# Resize if tokenizer vocab doesn't match model embeddings
 embed_size = model.get_input_embeddings().weight.shape[0]
 if len(tokenizer) != embed_size:
     print(f"Resizing embeddings: {embed_size} -> {len(tokenizer)}")
@@ -72,11 +75,11 @@ if len(tokenizer) != embed_size:
 print(f"VRAM after load: {torch.cuda.memory_allocated()/1e9:.1f} GB")
 
 # ============================================================
-# Stage 1: Freeze everything except embed_tokens + lm_head
+# Stage 1: Train embed_tokens + lm_head only
 # ============================================================
 
 if STAGE == 1:
-    print("\n>>> STAGE 1: Training embed_tokens + lm_head ONLY")
+    print("\n>>> STAGE 1: embed_tokens + lm_head ONLY")
 
     for param in model.parameters():
         param.requires_grad = False
@@ -84,14 +87,14 @@ if STAGE == 1:
     for name, param in model.named_parameters():
         if "embed_tokens" in name or "lm_head" in name:
             param.requires_grad = True
-            print(f"  Trainable: {name} | {param.shape}")
+            print(f"Trainable: {name}")
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total     = sum(p.numel() for p in model.parameters())
-    print(f"\nTrainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)\n")
+    print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
 
 # ============================================================
-# Stage 2: LoRA on attention+MLP + embed_tokens + lm_head
+# Stage 2: LoRA + embed_tokens + lm_head
 # ============================================================
 
 else:
@@ -100,53 +103,75 @@ else:
     lora_cfg = LoraConfig(
         r=LORA_R,
         lora_alpha=LORA_ALPHA,
-        lora_dropout=0.0,          # 0 dropout recommended for CPT
+        lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=[
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        modules_to_save=["embed_tokens", "lm_head"],  # critical for extended vocab
+        modules_to_save=["embed_tokens", "lm_head"],
     )
 
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
 
 # ============================================================
-# Dataset — line-by-line with token packing
+# Dataset
 # ============================================================
 
-print(f"\nLoading dataset...")
+print("\nLoading dataset...")
 dataset = load_dataset(
     "text",
     data_files={"train": TXT_PATH},
 )["train"]
 
 dataset = dataset.shuffle(seed=42)
-split   = dataset.train_test_split(test_size=0.02, seed=42)
+
+# -------- Subsample ----------
+if DATA_PERC < 1.0:
+    subset_size = int(len(dataset) * DATA_PERC)
+    dataset = dataset.select(range(subset_size))
+    print(f"Using {subset_size:,} lines ({DATA_PERC*100:.1f}%)")
+else:
+    print("Using full dataset")
+
+# -------- Split --------------
+split = dataset.train_test_split(test_size=0.02, seed=42)
 train_ds = split["train"]
 val_ds   = split["test"]
 
-print(f"Train lines: {len(train_ds):,} | Val lines: {len(val_ds):,}")
+print(f"Train lines: {len(train_ds):,}")
+print(f"Val lines:   {len(val_ds):,}")
+
+# ============================================================
+# Tokenization
+# ============================================================
 
 def tokenize_fn(example):
     text = example["text"].strip()
     if not text:
         return {"input_ids": []}
-    return {"input_ids": tokenizer(
-        text + tokenizer.eos_token,
-        add_special_tokens=False,
-    ).input_ids}
+    return {
+        "input_ids": tokenizer(
+            text + tokenizer.eos_token,
+            add_special_tokens=False,
+        ).input_ids
+    }
 
 def pack_tokens(examples):
     all_ids = []
     for ids in examples["input_ids"]:
         all_ids.extend(ids)
+
     total = (len(all_ids) // SEQ_LEN) * SEQ_LEN
     all_ids = all_ids[:total]
+
     return {
-        "input_ids": [all_ids[i:i+SEQ_LEN] for i in range(0, total, SEQ_LEN)]
+        "input_ids": [
+            all_ids[i:i+SEQ_LEN]
+            for i in range(0, total, SEQ_LEN)
+        ]
     }
 
 print("Tokenizing...")
@@ -164,7 +189,7 @@ print(f"Packed train sequences: {len(train_packed):,}")
 print(f"Packed val sequences:   {len(val_packed):,}")
 
 # ============================================================
-# Perplexity logging callback
+# Perplexity callback
 # ============================================================
 
 class PerplexityCallback(TrainerCallback):
@@ -188,7 +213,7 @@ training_args = TrainingArguments(
     per_device_train_batch_size=MICRO_BS,
     per_device_eval_batch_size=MICRO_BS,
     gradient_accumulation_steps=GRAD_ACC,
-    gradient_checkpointing=True,             # saves ~30% VRAM
+    gradient_checkpointing=True,
     gradient_checkpointing_kwargs={"use_reentrant": False},
     learning_rate=LR,
     warmup_ratio=0.05,
@@ -215,7 +240,7 @@ training_args = TrainingArguments(
 
 wandb.init(
     project="sinllama-cpt",
-    name=f"stage{STAGE}_r{LORA_R}_lr{LR}_ep{EPOCHS}_seq{SEQ_LEN}",
+    name=f"stage{STAGE}_lr{LR}_data{DATA_PERC}",
 )
 
 data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
@@ -242,24 +267,18 @@ trainer.train()
 print(f"\nSaving to {stage_out}...")
 
 if STAGE == 1:
-    save_path = os.path.join(stage_out, "model")
-    model.save_pretrained(save_path)
-    tokenizer.save_pretrained(save_path)
-    print(f"\n>>> Stage 1 complete. Now run Stage 2 with:")
-    print(f"    MODEL_PATH={save_path} STAGE=2 python /workspace/train_cpt.py")
+    model.save_pretrained(stage_out)
+    tokenizer.save_pretrained(stage_out)
 
 else:
-    # Save LoRA adapters
     adapter_path = os.path.join(stage_out, "adapters")
     model.save_pretrained(adapter_path)
     tokenizer.save_pretrained(adapter_path)
 
-    # Merge and save full model
-    print("Merging LoRA weights into base model...")
+    print("Merging LoRA...")
     merged = model.merge_and_unload()
     merged_path = os.path.join(stage_out, "merged_bf16")
     merged.save_pretrained(merged_path, safe_serialization=True)
     tokenizer.save_pretrained(merged_path)
-    print(f"\n>>> Stage 2 complete. Merged model at: {merged_path}")
 
 wandb.finish()
