@@ -7,6 +7,7 @@ sinllama_compact_lora_r16_cpu/
 sinllama_merged_fp32_cpu/
 unsloth_compiled_cache/
 OASST2/
+data/
 
 .env
 *.txt
