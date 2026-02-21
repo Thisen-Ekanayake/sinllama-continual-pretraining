@@ -8,7 +8,6 @@ from transformers import (
     AutoModelForCausalLM,
     TrainingArguments,
     Trainer,
-    DataCollatorForLanguageModeling,
 )
 from peft import LoraConfig, get_peft_model
 
@@ -137,18 +136,25 @@ Answer:"""
 dataset = dataset.map(build_prompt)
 
 # ============================================================
-# TOKENIZATION
+# TOKENIZATION (FIXED VERSION)
 # ============================================================
 
 def tokenize_fn(example):
-    return tokenizer(
+    tokens = tokenizer(
         example["text"],
         truncation=True,
         max_length=SEQ_LEN,
         padding="max_length",
     )
+    tokens["labels"] = tokens["input_ids"].copy()
+    return tokens
 
-dataset = dataset.map(tokenize_fn, batched=True, remove_columns=["text"])
+dataset = dataset.map(
+    tokenize_fn,
+    batched=True,
+    remove_columns=["text", "label"]  # <-- THIS FIXES YOUR ERROR
+)
+
 dataset.set_format(type="torch")
 
 train_ds = dataset["train"]
@@ -162,6 +168,7 @@ stage_out = os.path.join(OUT_DIR, f"{TASK}_stage{STAGE}")
 
 training_args = TrainingArguments(
     output_dir=stage_out,
+    run_name=f"{TASK}_stage{STAGE}_lr{LR}",
     bf16=True,
     tf32=True,
     per_device_train_batch_size=MICRO_BS,
@@ -175,7 +182,7 @@ training_args = TrainingArguments(
     num_train_epochs=EPOCHS,
     logging_steps=20,
     save_strategy="epoch",
-    eval_strategy="epoch",
+    evaluation_strategy="epoch",
     save_total_limit=2,
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
@@ -204,7 +211,6 @@ trainer = Trainer(
     args=training_args,
     train_dataset=train_ds,
     eval_dataset=val_ds,
-    data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
 )
 
 trainer.train()
