@@ -7,7 +7,7 @@ from peft import PeftModel
 # PATHS
 # ==========================================
 
-BASE_MODEL = "/workspace/model/SinLlama_CPT"
+BASE_MODEL = "/workspace/sinllama_cpt_out/stage2/merged_bf16"
 CHECKPOINT_PATH = "/workspace/classification_out/writing_stage2/checkpoint-1875"
 OUT_DIR = "/workspace/classification_out/writing_stage2"
 
