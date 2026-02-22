@@ -55,7 +55,7 @@ if tokenizer.pad_token is None:
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
     torch_dtype=torch.bfloat16,
-    device_map=None,
+    device_map="cuda",
     attn_implementation="sdpa",
 )
 
