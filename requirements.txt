@@ -113,3 +113,6 @@ xxhash==3.6.0
 yarl==1.22.0
 zipp==3.23.0
 wandb==0.25.0
+ray[tune]==2.44.1
+optuna==4.3.0
+scikit-learn==1.8.0
