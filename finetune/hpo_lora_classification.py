@@ -495,7 +495,7 @@ def run_hpo():
         progress_reporter=reporter,
         # Each trial gets 25% of the GPU — 4 concurrent trials on one MI300X
         resources_per_trial={"gpu": 0.25, "cpu": 4},
-        local_dir=os.path.join(OUT_DIR, "ray_results"),
+        storage_path=os.path.join(OUT_DIR, "ray_results"),
         name=f"hpo_{TASK}_stage{STAGE}",
         verbose=1,
     )
