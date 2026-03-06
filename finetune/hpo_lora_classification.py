@@ -6,7 +6,7 @@ Logs per-epoch eval metrics (loss, accuracy, F1) to JSON.
 Fixes applied:
   - tf32=False          (tf32 is NVIDIA Ampere only, crashes on ROCm)
   - modules_to_save     removed (caused OOM via tied weight duplication)
-  - resources_per_trial {"gpu": 0.5} → 2 concurrent trials (~45GB each)
+  - resources_per_trial {"gpu": 1.0} → sequential trials, no concurrency
   - micro_bs            capped at 64 (removes 128 from search space)
   - device_map          {"": torch.cuda.current_device()} for Ray isolation
 """
@@ -471,8 +471,8 @@ def run_hpo():
         scheduler=scheduler,
         search_alg=search_algo,
         progress_reporter=reporter,
-        # FIX: 0.5 GPU per trial → 2 concurrent trials (~45 GB each)
-        resources_per_trial={"gpu": 0.5, "cpu": 4},
+        # Sequential trials — 1 trial at a time, full GPU to each
+        resources_per_trial={"gpu": 1.0, "cpu": 8},
         storage_path=os.path.join(OUT_DIR, "ray_results"),
         name=f"hpo_{TASK}_stage{STAGE}",
         verbose=1,
