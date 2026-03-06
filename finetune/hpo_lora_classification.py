@@ -2,6 +2,13 @@
 train_lora_classification.py
 MI300X-optimised LoRA fine-tuning + Ray Tune ASHA hyperparameter search
 Logs per-epoch eval metrics (loss, accuracy, F1) to JSON.
+
+Fixes applied:
+  - tf32=False          (tf32 is NVIDIA Ampere only, crashes on ROCm)
+  - modules_to_save     removed (caused OOM via tied weight duplication)
+  - resources_per_trial {"gpu": 0.5} → 2 concurrent trials (~45GB each)
+  - micro_bs            capped at 64 (removes 128 from search space)
+  - device_map          {"": torch.cuda.current_device()} for Ray isolation
 """
 
 import os
@@ -11,10 +18,6 @@ import datetime
 import numpy as np
 import torch
 import wandb
-
-from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Optional
 
 from datasets import load_dataset
 from transformers import (
@@ -31,7 +34,7 @@ from sklearn.metrics import f1_score, accuracy_score
 # Ray Tune
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
-from ray.tune.search.optuna import OptunaSearch          # Bayesian proposals
+from ray.tune.search.optuna import OptunaSearch
 from ray.tune import CLIReporter
 
 
@@ -54,13 +57,13 @@ HPO_MODE    = bool(int(os.environ.get("HPO", "0")))
 HPO_TRIALS  = int(os.environ.get("HPO_TRIALS", "20"))
 
 # Single-run defaults (ignored when HPO=1)
-MICRO_BS    = int(os.environ.get("MICRO_BS",    "64"))
-GRAD_ACC    = int(os.environ.get("GRAD_ACC",    "1"))
-EPOCHS      = float(os.environ.get("EPOCHS",    "3"))
-LR          = float(os.environ.get("LR",        "1e-5"))
-LORA_R      = int(os.environ.get("LORA_R",      "16"))
-LORA_DROPOUT= float(os.environ.get("LORA_DROPOUT", "0.05"))
-WEIGHT_DECAY= float(os.environ.get("WEIGHT_DECAY", "0.1"))
+MICRO_BS     = int(os.environ.get("MICRO_BS",     "64"))
+GRAD_ACC     = int(os.environ.get("GRAD_ACC",     "1"))
+EPOCHS       = float(os.environ.get("EPOCHS",     "3"))
+LR           = float(os.environ.get("LR",         "1e-5"))
+LORA_R       = int(os.environ.get("LORA_R",       "16"))
+LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.05"))
+WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "0.1"))
 
 WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "sinllama-classification")
 
@@ -68,7 +71,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # ============================================================
-# TASK METADATA  (label tokens for causal-LM decode trick)
+# TASK METADATA
 # ============================================================
 
 TASK_META = {
@@ -102,7 +105,7 @@ TASK_META = {
 
 class EpochJSONLogger(TrainerCallback):
     """
-    Writes one JSON record per epoch to  LOG_DIR/<run_name>_epochs.json
+    Writes one JSON record per epoch to  LOG_DIR/<run_name>_epochs.jsonl
     Final summary goes to LOG_DIR/<run_name>_summary.json
     """
 
@@ -113,7 +116,6 @@ class EpochJSONLogger(TrainerCallback):
         self.history    = []
         self._train_loss_accum = []
 
-    # accumulate per-step train loss
     def on_log(self, args, state, control, logs=None, **kwargs):
         if logs and "loss" in logs:
             self._train_loss_accum.append(logs["loss"])
@@ -133,9 +135,8 @@ class EpochJSONLogger(TrainerCallback):
         }
 
         self.history.append(epoch_record)
-        self._train_loss_accum = []   # reset for next epoch
+        self._train_loss_accum = []
 
-        # append to .jsonl  (one JSON object per line)
         with open(self.epoch_file, "a") as f:
             f.write(json.dumps(epoch_record) + "\n")
 
@@ -161,7 +162,7 @@ class EpochJSONLogger(TrainerCallback):
 
 
 # ============================================================
-# TOKENIZER  (load once, reuse)
+# TOKENIZER
 # ============================================================
 
 def load_tokenizer():
@@ -188,8 +189,8 @@ def build_dataset(tokenizer, seq_len: int):
     )
 
     def build_example(example):
-        text  = example["text"]
-        label = str(example["label"])
+        text   = example["text"]
+        label  = str(example["label"])
         prompt = prompt_fn(text)
         full   = prompt + " " + label + tokenizer.eos_token
         return {"full_text": full, "prompt": prompt}
@@ -197,7 +198,6 @@ def build_dataset(tokenizer, seq_len: int):
     raw = raw.map(build_example)
 
     def tokenize_fn(example):
-        # Tokenize full sequence
         tokens = tokenizer(
             example["full_text"],
             truncation=True,
@@ -205,7 +205,7 @@ def build_dataset(tokenizer, seq_len: int):
             padding="max_length",
         )
 
-        # Mask prompt tokens so loss only applies to the label token(s)
+        # Mask prompt tokens — loss only on label token(s)
         prompt_ids = tokenizer(
             example["prompt"],
             truncation=True,
@@ -216,7 +216,7 @@ def build_dataset(tokenizer, seq_len: int):
 
         labels = tokens["input_ids"].copy()
         for i in range(min(prompt_len, len(labels))):
-            labels[i] = -100          # ignore prompt in loss
+            labels[i] = -100
 
         tokens["labels"] = labels
         return tokens
@@ -235,27 +235,20 @@ def build_dataset(tokenizer, seq_len: int):
 # ============================================================
 
 def make_compute_metrics(tokenizer):
-    """
-    For causal LM classification: the label token is the second-to-last
-    non-padding token (before EOS).  We decode the argmax logit at that
-    position and compare to the true label string.
-    """
     def compute_metrics(eval_pred):
-        logits, labels = eval_pred          # (N, seq, vocab), (N, seq)
+        logits, labels = eval_pred   # (N, seq, vocab), (N, seq)
 
-        pred_ids  = []
-        true_ids  = []
+        pred_ids = []
+        true_ids = []
 
         for i in range(logits.shape[0]):
-            # find last non -100 label position  →  that is the label token
             label_row = labels[i]
             valid_pos = np.where(label_row != -100)[0]
             if len(valid_pos) == 0:
                 continue
             last_pos = valid_pos[-1]
 
-            # predicted token at that position
-            pred_tok = int(np.argmax(logits[i, last_pos - 1]))   # logit before label
+            pred_tok = int(np.argmax(logits[i, last_pos - 1]))
             true_tok = int(label_row[last_pos])
 
             pred_ids.append(pred_tok)
@@ -283,9 +276,9 @@ def build_model(lora_r: int, lora_dropout: float):
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
-        device_map="cuda",
-        # Use "eager" for ROCm safety; swap to "sdpa" if your ROCm build supports it
-        attn_implementation="eager",
+        # FIX: safe for Ray worker GPU isolation
+        device_map={"": torch.cuda.current_device()},
+        attn_implementation="eager",   # ROCm-safe; swap to "sdpa" if supported
     )
     model.config.use_cache = False
 
@@ -301,7 +294,7 @@ def build_model(lora_r: int, lora_dropout: float):
         print(f"\n>>> STAGE 2: LoRA r={lora_r}, dropout={lora_dropout}")
         lora_cfg = LoraConfig(
             r=lora_r,
-            lora_alpha=lora_r * 2,           # alpha = 2r is a solid default
+            lora_alpha=lora_r * 2,
             lora_dropout=lora_dropout,
             bias="none",
             task_type="CAUSAL_LM",
@@ -309,7 +302,8 @@ def build_model(lora_r: int, lora_dropout: float):
                 "q_proj", "k_proj", "v_proj", "o_proj",
                 "gate_proj", "up_proj", "down_proj",
             ],
-            modules_to_save=["embed_tokens", "lm_head"],
+            # FIX: modules_to_save removed — model has tie_word_embeddings=True
+            # which causes PEFT to duplicate tied weights per trial → OOM on HPO
         )
         model = get_peft_model(model, lora_cfg)
         model.print_trainable_parameters()
@@ -330,14 +324,13 @@ def train(config: dict, run_name: str, report_to: str = "wandb"):
     grad_acc     = config["grad_acc"]
     epochs       = config["epochs"]
 
-    tokenizer  = load_tokenizer()
+    tokenizer        = load_tokenizer()
     train_ds, val_ds = build_dataset(tokenizer, SEQ_LEN)
-    model      = build_model(lora_r, lora_dropout)
+    model            = build_model(lora_r, lora_dropout)
 
-    stage_out  = os.path.join(OUT_DIR, run_name)
+    stage_out = os.path.join(OUT_DIR, run_name)
     os.makedirs(stage_out, exist_ok=True)
 
-    # Save config alongside checkpoints
     with open(os.path.join(stage_out, "run_config.json"), "w") as f:
         json.dump({"run_name": run_name, "task": TASK, "stage": STAGE, **config}, f, indent=2)
 
@@ -345,31 +338,30 @@ def train(config: dict, run_name: str, report_to: str = "wandb"):
         output_dir=stage_out,
         run_name=run_name,
 
-        # ── dtype ──────────────────────────────────────────
+        # ── dtype ──────────────────────────────────────────────────
         bf16=True,
-        tf32=True,
+        tf32=False,       # FIX: tf32 is NVIDIA Ampere only, not ROCm
 
-        # ── batch / accumulation ───────────────────────────
+        # ── batch / accumulation ───────────────────────────────────
         per_device_train_batch_size=micro_bs,
         per_device_eval_batch_size=micro_bs,
         gradient_accumulation_steps=grad_acc,
 
-        # ── MI300X: 192 GB → NO gradient checkpointing ─────
+        # ── MI300X: 192 GB → NO gradient checkpointing needed ──────
         gradient_checkpointing=False,
 
-        # ── optimiser ──────────────────────────────────────
-        # Use adamw_torch (not fused) for ROCm compatibility
-        optim="adamw_torch",
+        # ── optimiser ──────────────────────────────────────────────
+        optim="adamw_torch",   # not fused — ROCm compatible
         learning_rate=lr,
         weight_decay=weight_decay,
         max_grad_norm=1.0,
 
-        # ── schedule ───────────────────────────────────────
+        # ── schedule ───────────────────────────────────────────────
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         num_train_epochs=epochs,
 
-        # ── eval / save ────────────────────────────────────
+        # ── eval / save ────────────────────────────────────────────
         eval_strategy="epoch",
         save_strategy="epoch",
         logging_steps=20,
@@ -378,7 +370,7 @@ def train(config: dict, run_name: str, report_to: str = "wandb"):
         metric_for_best_model="eval_f1",
         greater_is_better=True,
 
-        # ── reporting ──────────────────────────────────────
+        # ── reporting ──────────────────────────────────────────────
         report_to=report_to,
     )
 
@@ -398,7 +390,7 @@ def train(config: dict, run_name: str, report_to: str = "wandb"):
 
     trainer.train()
 
-    # ── save ──────────────────────────────────────────────
+    # ── save ───────────────────────────────────────────────────────
     if STAGE == 1:
         model.save_pretrained(stage_out)
         tokenizer.save_pretrained(stage_out)
@@ -408,12 +400,11 @@ def train(config: dict, run_name: str, report_to: str = "wandb"):
         tokenizer.save_pretrained(adapter_path)
 
         print("Merging LoRA weights...")
-        merged = model.merge_and_unload()
+        merged      = model.merge_and_unload()
         merged_path = os.path.join(stage_out, "merged_bf16")
         merged.save_pretrained(merged_path, safe_serialization=True)
         tokenizer.save_pretrained(merged_path)
 
-    # Return best metric for Ray Tune
     best_metric = max(
         (r.get("eval_f1", 0) for r in epoch_logger.history),
         default=0.0,
@@ -422,11 +413,10 @@ def train(config: dict, run_name: str, report_to: str = "wandb"):
 
 
 # ============================================================
-# RAY TUNE  WRAPPER
+# RAY TUNE WRAPPER
 # ============================================================
 
 def ray_train_fn(ray_config):
-    """Thin wrapper so Ray can call train() and report metrics."""
     ts = int(time.time())
     run_name = (
         f"{TASK}_s{STAGE}"
@@ -449,36 +439,24 @@ def run_hpo():
     print(f"{'='*60}\n")
 
     search_space = {
-        # Learning rate: log-uniform between 5e-6 and 5e-4
         "lr":           tune.loguniform(5e-6, 5e-4),
-
-        # LoRA rank: small values fight overfitting
         "lora_r":       tune.choice([8, 16, 32, 64]),
-
-        # Dropout on LoRA layers
         "lora_dropout": tune.choice([0.0, 0.05, 0.1]),
-
-        # Regularisation
         "weight_decay": tune.choice([0.01, 0.05, 0.1]),
-
-        # Batch size — all fit easily in 192 GB
-        "micro_bs":     tune.choice([32, 64, 128]),
+        # FIX: max batch size 64 — safe for 2 concurrent trials on 192 GB
+        "micro_bs":     tune.choice([16, 32, 64]),
         "grad_acc":     tune.choice([1, 2]),
-
-        # Epochs
         "epochs":       tune.choice([2, 3, 5]),
     }
 
-    # ASHA: kills bad trials early, promotes survivors with more budget
     scheduler = ASHAScheduler(
         metric="eval_f1",
         mode="max",
-        max_t=5,              # max epochs any trial can run
-        grace_period=1,       # every trial runs ≥1 epoch before being eligible for pruning
-        reduction_factor=2,   # bottom 50% killed each round
+        max_t=5,
+        grace_period=1,
+        reduction_factor=2,
     )
 
-    # Optuna as the search algorithm (Bayesian proposals)
     search_algo = OptunaSearch(metric="eval_f1", mode="max")
 
     reporter = CLIReporter(
@@ -493,23 +471,23 @@ def run_hpo():
         scheduler=scheduler,
         search_alg=search_algo,
         progress_reporter=reporter,
-        # Each trial gets 25% of the GPU — 4 concurrent trials on one MI300X
-        resources_per_trial={"gpu": 0.25, "cpu": 4},
+        # FIX: 0.5 GPU per trial → 2 concurrent trials (~45 GB each)
+        resources_per_trial={"gpu": 0.5, "cpu": 4},
         storage_path=os.path.join(OUT_DIR, "ray_results"),
         name=f"hpo_{TASK}_stage{STAGE}",
         verbose=1,
     )
 
-    best_cfg  = analysis.get_best_config(metric="eval_f1", mode="max")
+    best_cfg   = analysis.get_best_config(metric="eval_f1", mode="max")
     best_trial = analysis.get_best_trial(metric="eval_f1", mode="max")
 
     hpo_summary = {
-        "task":          TASK,
-        "stage":         STAGE,
-        "num_trials":    HPO_TRIALS,
-        "best_config":   best_cfg,
-        "best_eval_f1":  best_trial.last_result["eval_f1"],
-        "timestamp":     datetime.datetime.utcnow().isoformat(),
+        "task":         TASK,
+        "stage":        STAGE,
+        "num_trials":   HPO_TRIALS,
+        "best_config":  best_cfg,
+        "best_eval_f1": best_trial.last_result["eval_f1"],
+        "timestamp":    datetime.datetime.utcnow().isoformat(),
     }
 
     hpo_path = os.path.join(LOG_DIR, f"hpo_{TASK}_stage{STAGE}_results.json")
@@ -551,9 +529,7 @@ def run_single():
     print(f"{'='*60}\n")
 
     wandb.init(project=WANDB_PROJECT, name=run_name)
-
     best_f1 = train(config, run_name=run_name, report_to="wandb")
-
     print(f"\nBest eval F1: {best_f1:.4f}")
     wandb.finish()
 
@@ -566,12 +542,11 @@ if __name__ == "__main__":
     if HPO_MODE:
         best_config = run_hpo()
 
-        # Optional: automatically re-train with best config at full epochs
         retrain = bool(int(os.environ.get("RETRAIN_BEST", "1")))
         if retrain:
             print("\nRe-training with best config at full budget...")
             best_config["epochs"] = float(os.environ.get("RETRAIN_EPOCHS", "5"))
-            ts = int(time.time())
+            ts       = int(time.time())
             run_name = f"{TASK}_s{STAGE}_best_{ts}"
             wandb.init(project=WANDB_PROJECT, name=run_name)
             best_f1 = train(best_config, run_name=run_name, report_to="wandb")
