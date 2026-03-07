@@ -236,34 +236,64 @@ def build_dataset(tokenizer, seq_len: int):
 
 
 # ============================================================
-# COMPUTE METRICS
+# COMPUTE METRICS  +  PREPROCESS LOGITS
 # ============================================================
+#
+# ROOT CAUSE OF OOM:
+#   Trainer.evaluate() accumulates ALL logit tensors across the entire
+#   eval set before calling compute_metrics.  With a large-vocab model
+#   that's  (N_eval, seq_len, vocab_size) — easily 70+ GB for a LLaMA
+#   class model.  The fix is preprocess_logits_for_metrics: this hook
+#   runs *per batch* inside the eval loop, before tensors are stored.
+#   We reduce (seq_len, vocab_size) -> (1,) per sample immediately,
+#   so what gets accumulated is just (N_eval,) predicted token IDs —
+#   negligible memory.
+#
+# SHAPE CONTRACT after preprocessing:
+#   logits -> (N,)        int64 predicted token id at the label position
+#   labels -> (N, seq_len) original labels with -100 masks
+
+def preprocess_logits_for_metrics(logits, labels):
+    """
+    Called per batch BEFORE tensors are concatenated into the eval buffer.
+    Reduces (batch, seq_len, vocab_size) -> (batch,) by picking the
+    argmax at position (last_label_pos - 1) for each sample.
+    """
+    batch_size = labels.shape[0]
+    pred_ids = torch.zeros(batch_size, dtype=torch.long, device=logits.device)
+
+    for i in range(batch_size):
+        valid = (labels[i] != -100).nonzero(as_tuple=False)
+        if len(valid) == 0:
+            pos = logits.shape[1] - 2          # fallback: second-to-last token
+        else:
+            pos = int(valid[-1]) - 1           # token *before* the label token
+            pos = max(pos, 0)
+        pred_ids[i] = logits[i, pos].argmax()
+
+    return pred_ids   # (B,) -- tiny; safe to accumulate across full eval set
+
 
 def make_compute_metrics(tokenizer):
     def compute_metrics(eval_pred):
-        logits, labels = eval_pred   # (N, seq, vocab), (N, seq)
+        # After preprocessing: pred_ids (N,), labels (N, seq_len)
+        pred_ids, labels = eval_pred
 
-        pred_ids = []
         true_ids = []
+        valid_preds = []
 
-        for i in range(logits.shape[0]):
-            label_row = labels[i]
-            valid_pos = np.where(label_row != -100)[0]
-            if len(valid_pos) == 0:
+        for i in range(labels.shape[0]):
+            valid = np.where(labels[i] != -100)[0]
+            if len(valid) == 0:
                 continue
-            last_pos = valid_pos[-1]
+            true_ids.append(int(labels[i, valid[-1]]))
+            valid_preds.append(int(pred_ids[i]))
 
-            pred_tok = int(np.argmax(logits[i, last_pos - 1]))
-            true_tok = int(label_row[last_pos])
-
-            pred_ids.append(pred_tok)
-            true_ids.append(true_tok)
-
-        if not pred_ids:
+        if not true_ids:
             return {"eval_f1": 0.0, "eval_accuracy": 0.0}
 
-        f1  = f1_score(true_ids, pred_ids, average="macro", zero_division=0)
-        acc = accuracy_score(true_ids, pred_ids)
+        f1  = f1_score(true_ids, valid_preds, average="macro", zero_division=0)
+        acc = accuracy_score(true_ids, valid_preds)
 
         return {
             "eval_f1":       round(float(f1),  4),
@@ -394,6 +424,10 @@ def train(config: dict, run_name: str, report_to: str = "wandb"):
         train_dataset=train_ds,
         eval_dataset=val_ds,
         compute_metrics=make_compute_metrics(tokenizer),
+        # KEY FIX: collapse (B, seq, vocab) -> (B,) per batch before accumulation.
+        # Without this, the Trainer buffers the full logit tensor for the entire
+        # eval set — 70+ GB on a LLaMA-class model — causing the OOM in the logs.
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         callbacks=[
             epoch_logger,
             EarlyStoppingCallback(early_stopping_patience=2),
