@@ -4,11 +4,16 @@ MI300X-optimised LoRA fine-tuning + Ray Tune ASHA hyperparameter search
 Logs per-epoch eval metrics (loss, accuracy, F1) to JSON.
 
 Fixes applied:
-  - tf32=False          (tf32 is NVIDIA Ampere only, crashes on ROCm)
-  - modules_to_save     removed (caused OOM via tied weight duplication)
+  - tf32=False               (tf32 is NVIDIA Ampere only, crashes on ROCm)
+  - modules_to_save          removed (caused OOM via tied weight duplication)
   - resources_per_trial {"gpu": 1.0} → sequential trials, no concurrency
-  - micro_bs            capped at 64 (removes 128 from search space)
-  - device_map          {"": torch.cuda.current_device()} for Ray isolation
+  - micro_bs                 capped at 16 default (was 64) to stay < 192 GB
+  - grad_acc                 default 4 (was 1) to preserve effective batch size
+  - gradient_checkpointing   enabled — halves activation VRAM at ~20% speed cost
+  - per_device_eval_batch_size capped at 16 (eval needs full logits in memory)
+  - device_map               {"": torch.cuda.current_device()} for Ray isolation
+  - HPO search space         micro_bs max 32 (was 64), grad_acc up to 4
+  - optim                    adamw_torch_fused for lower optimizer state memory
 """
 
 import os
@@ -57,8 +62,8 @@ HPO_MODE    = bool(int(os.environ.get("HPO", "0")))
 HPO_TRIALS  = int(os.environ.get("HPO_TRIALS", "20"))
 
 # Single-run defaults (ignored when HPO=1)
-MICRO_BS     = int(os.environ.get("MICRO_BS",     "64"))
-GRAD_ACC     = int(os.environ.get("GRAD_ACC",     "1"))
+MICRO_BS     = int(os.environ.get("MICRO_BS",     "16"))   # was 64 — reduced to cut activation VRAM
+GRAD_ACC     = int(os.environ.get("GRAD_ACC",     "4"))    # was 1  — keeps effective BS=64
 EPOCHS       = float(os.environ.get("EPOCHS",     "3"))
 LR           = float(os.environ.get("LR",         "1e-5"))
 LORA_R       = int(os.environ.get("LORA_R",       "16"))
@@ -280,7 +285,11 @@ def build_model(lora_r: int, lora_dropout: float):
         device_map={"": torch.cuda.current_device()},
         attn_implementation="eager",   # ROCm-safe; swap to "sdpa" if supported
     )
-    model.config.use_cache = False
+    model.config.use_cache = False   # required when gradient_checkpointing=True
+
+    # PEFT + gradient checkpointing: enable_input_require_grads prevents
+    # "inputs don't require gradients" warning/hang with frozen base layers
+    model.enable_input_require_grads()
 
     if STAGE == 1:
         print("\n>>> STAGE 1: embed_tokens + lm_head ONLY")
@@ -344,14 +353,17 @@ def train(config: dict, run_name: str, report_to: str = "wandb"):
 
         # ── batch / accumulation ───────────────────────────────────
         per_device_train_batch_size=micro_bs,
-        per_device_eval_batch_size=micro_bs,
+        per_device_eval_batch_size=min(micro_bs, 16),  # cap eval BS — full logits stay in VRAM
         gradient_accumulation_steps=grad_acc,
 
-        # ── MI300X: 192 GB → NO gradient checkpointing needed ──────
-        gradient_checkpointing=False,
+        # ── gradient checkpointing: recompute activations on backward ──
+        # halves activation memory at ~20 % throughput cost; essential
+        # for large models to stay well below 192 GB
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
 
         # ── optimiser ──────────────────────────────────────────────
-        optim="adamw_torch",   # not fused — ROCm compatible
+        optim="adamw_torch_fused",   # fused kernel — lower optimizer peak memory
         learning_rate=lr,
         weight_decay=weight_decay,
         max_grad_norm=1.0,
@@ -443,9 +455,10 @@ def run_hpo():
         "lora_r":       tune.choice([8, 16, 32, 64]),
         "lora_dropout": tune.choice([0.0, 0.05, 0.1]),
         "weight_decay": tune.choice([0.01, 0.05, 0.1]),
-        # FIX: max batch size 64 — safe for 2 concurrent trials on 192 GB
-        "micro_bs":     tune.choice([16, 32, 64]),
-        "grad_acc":     tune.choice([1, 2]),
+        # FIX: micro_bs max 32 — keeps peak VRAM safely under 192 GB
+        # even with lora_r=64; raise to 64 only if your model is small
+        "micro_bs":     tune.choice([8, 16, 32]),
+        "grad_acc":     tune.choice([1, 2, 4]),
         "epochs":       tune.choice([2, 3, 5]),
     }
 
