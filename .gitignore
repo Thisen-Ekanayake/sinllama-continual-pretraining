@@ -15,5 +15,7 @@ data/
 *.json
 *.jsonl
 *.tar*
+*.pdf
+*.png
 
 !requirements.txt
