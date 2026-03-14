@@ -582,9 +582,6 @@ trainer = Trainer(
     train_dataset=train_ds,
     eval_dataset=val_ds,
     compute_metrics=compute_metrics,
-    # Explicitly pass label_names — PEFT wraps the model and Trainer
-    # cannot infer them automatically, causing a harmless but noisy warning.
-    label_names=["labels"],
 )
 
 approx_steps = int(len(train_ds) * EPOCHS / (MICRO_BS * GRAD_ACC))
