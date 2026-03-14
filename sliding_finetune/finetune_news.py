@@ -85,15 +85,23 @@ USE_WANDB   = os.environ.get("USE_WANDB", "true").lower() != "false"
 
 # ---- Label map (fixed for this task) ----
 # NOTE: label names must each tokenise to a single distinct token in the
-# model vocabulary.  "entertainment" splits into multiple tokens in the
-# LLaMA tokeniser so we use "entertain" as the prompt/answer keyword and
-# map it back to the canonical name for display / CSV outputs.
-LABEL_NAMES        = ["political", "business", "technology", "sports", "entertainment"]
-LABEL_PROMPT_WORDS = ["political", "business", "technology", "sports", "entertain"]
-NUM_LABELS         = len(LABEL_NAMES)
-ID_TO_LABEL        = {i: n      for i, n in enumerate(LABEL_NAMES)}
-ID_TO_PROMPT_WORD  = {i: w      for i, w in enumerate(LABEL_PROMPT_WORDS)}
-PROMPT_WORD_TO_ID  = {w: i      for i, w in enumerate(LABEL_PROMPT_WORDS)}
+# model vocabulary.  "entertainment" and "entertain" split into multiple
+# tokens in this tokeniser, so we auto-select the first single-token
+# candidate from the fallback list at runtime (after the tokenizer loads).
+LABEL_NAMES = ["political", "business", "technology", "sports", "entertainment"]
+NUM_LABELS  = len(LABEL_NAMES)
+ID_TO_LABEL = {i: n for i, n in enumerate(LABEL_NAMES)}
+
+# Candidates tried in order for the entertainment slot.
+# The first one that tokenises to exactly 1 token will be used.
+ENTERTAINMENT_CANDIDATES = [
+    "entertainment", "entertain", "film", "media", "arts",
+    "show", "cinema", "music", "drama", "cultural",
+]
+# Filled in after the tokenizer loads (see verification block below)
+LABEL_PROMPT_WORDS: list = []
+ID_TO_PROMPT_WORD:  dict = {}
+PROMPT_WORD_TO_ID:  dict = {}
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -139,19 +147,47 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 print(f"✓ Tokenizer  vocab={tokenizer.vocab_size}  pad='{tokenizer.pad_token}'")
 
-# ---- Verify every prompt word is a single token ----
-# This must run after the tokenizer is loaded but before training starts.
-print("\nVerifying label prompt words tokenise to single tokens:")
-for lid, word in ID_TO_PROMPT_WORD.items():
+# ---- Build LABEL_PROMPT_WORDS: auto-select single-token word per label ----
+# For most labels the canonical name is already a single token.
+# For "entertainment" we try a candidate list and pick the first hit.
+print("\nResolving label prompt words (must each be a single token):")
+
+BASE_PROMPT_WORDS = ["political", "business", "technology", "sports"]
+
+for word in BASE_PROMPT_WORDS:
     toks = tokenizer(word, add_special_tokens=False)["input_ids"]
-    decoded = tokenizer.decode(toks)
-    status = "✓" if len(toks) == 1 else "✗ MULTI-TOKEN — change this word!"
-    print(f"  [{lid}] {LABEL_NAMES[lid]:14s} → prompt word '{word}' → {toks} ('{decoded}') {status}")
     if len(toks) != 1:
         raise ValueError(
-            f"Label prompt word '{word}' tokenises to {len(toks)} tokens {toks}. "
-            f"Replace it with a single-token word in LABEL_PROMPT_WORDS."
+            f"Base label word '{word}' tokenises to {len(toks)} tokens {toks}. "
+            f"This is unexpected — check the tokenizer."
         )
+    LABEL_PROMPT_WORDS.append(word)
+
+# Auto-select for entertainment
+ent_word = None
+for candidate in ENTERTAINMENT_CANDIDATES:
+    toks = tokenizer(candidate, add_special_tokens=False)["input_ids"]
+    if len(toks) == 1:
+        ent_word = candidate
+        break
+
+if ent_word is None:
+    raise ValueError(
+        f"None of the entertainment candidates tokenise to a single token: "
+        f"{ENTERTAINMENT_CANDIDATES}. Add more candidates to the list."
+    )
+
+LABEL_PROMPT_WORDS.append(ent_word)
+
+# Build lookup dicts
+ID_TO_PROMPT_WORD = {i: w for i, w in enumerate(LABEL_PROMPT_WORDS)}
+PROMPT_WORD_TO_ID = {w: i for i, w in enumerate(LABEL_PROMPT_WORDS)}
+
+print(f"  Entertainment candidate selected: '{ent_word}'")
+print()
+for lid, word in ID_TO_PROMPT_WORD.items():
+    toks = tokenizer(word, add_special_tokens=False)["input_ids"]
+    print(f"  [{lid}] {LABEL_NAMES[lid]:14s} → prompt word '{word:12s}' → token_id={toks[0]}  '{tokenizer.decode(toks)}' ✓")
 
 # ============================================================
 # MODEL  (LoRA only — Stage 2)
@@ -214,10 +250,11 @@ def sliding_window_token_ids(
 
 def build_prompt(text: str, label_id: int) -> str:
     """Full prompt+answer string used for causal-LM training."""
-    word = ID_TO_PROMPT_WORD[label_id]
+    word         = ID_TO_PROMPT_WORD[label_id]
+    options_list = ", ".join(ID_TO_PROMPT_WORD[i] for i in range(NUM_LABELS))
     return (
         f"Classify the following Sinhala news article into one of: "
-        f"political, business, technology, sports, entertain.\n\n"
+        f"{options_list}.\n\n"
         f"Article: {text}\n"
         f"Category: {word}{tokenizer.eos_token}"
     )
@@ -225,9 +262,10 @@ def build_prompt(text: str, label_id: int) -> str:
 
 def build_prompt_no_label(text: str) -> str:
     """Prompt without answer — used to compute the label-only loss mask."""
+    options_list = ", ".join(ID_TO_PROMPT_WORD[i] for i in range(NUM_LABELS))
     return (
         f"Classify the following Sinhala news article into one of: "
-        f"political, business, technology, sports, entertain.\n\n"
+        f"{options_list}.\n\n"
         f"Article: {text}\n"
         f"Category:"
     )
