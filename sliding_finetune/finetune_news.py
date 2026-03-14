@@ -213,6 +213,9 @@ lora_cfg = LoraConfig(
         "gate_proj", "up_proj", "down_proj",
     ],
     modules_to_save=["embed_tokens", "lm_head"],
+    # Required when tie_word_embeddings=True to prevent NaN from
+    # mismatched tied weights during the forward pass on ROCm/CUDA.
+    ensure_weight_tying=True,
 )
 model = get_peft_model(model, lora_cfg)
 model.print_trainable_parameters()
@@ -311,39 +314,47 @@ for i, name in ID_TO_LABEL.items():
 def tokenise_df(df: pd.DataFrame, split_name: str) -> HFDataset:
     """
     For each row, tokenise the article text, apply sliding-window chunking,
-    and build one training example per chunk.  The label answer token is
-    masked out of the loss for the prompt prefix (only the answer token
-    contributes to the loss).
+    and build one training example per chunk.
+
+    Label masking strategy (matches the original train_lora_classification.py):
+      - labels = input_ids for the entire sequence
+      - mask (set to -100) every position that belongs to the prompt prefix
+      - keep the label word + EOS token as supervised targets
+      - mask padding positions
+
+    Supervising label+EOS (2 tokens) rather than only 1 token avoids the
+    numerical instability (NaN loss) that occurs when computing softmax over
+    128k logits in bf16 with only a single supervised position.
     """
     all_input_ids      = []
     all_attention_mask = []
     all_labels         = []
-    all_label_ids      = []   # integer class ids kept for compute_metrics
+    all_label_ids      = []
+
+    supervised_lens = []   # for debug stats
 
     for _, row in df.iterrows():
-        text       = str(row["text"])
-        label_id   = int(row["label"])
+        text     = str(row["text"])
+        label_id = int(row["label"])
 
-        # Tokenise just the article body to decide chunking boundaries.
-        # We leave room for the prompt wrapper + answer.
-        prompt_prefix = build_prompt_no_label("")   # overhead estimate
-        overhead      = len(tokenizer(prompt_prefix, add_special_tokens=False)["input_ids"]) + 8
-        body_budget   = CHUNK_SIZE - overhead        # tokens available for article body
+        # How many tokens the prompt wrapper uses (without any article body)
+        overhead    = len(tokenizer(
+            build_prompt_no_label(""), add_special_tokens=False
+        )["input_ids"]) + 8
+        body_budget = max(CHUNK_SIZE - overhead, 32)
 
         body_ids = tokenizer(
             text, add_special_tokens=False, truncation=False
         )["input_ids"]
 
-        # Sliding window over body token IDs
         body_chunks = sliding_window_token_ids(
             body_ids,
-            chunk_size=max(body_budget, 32),
+            chunk_size=body_budget,
             stride=max(body_budget // 2, 16),
             max_chunks=MAX_CHUNKS,
         )
 
         for chunk_ids in body_chunks:
-            # Decode chunk back to text so we can build the prompt cleanly
             chunk_text = tokenizer.decode(chunk_ids, skip_special_tokens=True)
             full_text  = build_prompt(chunk_text, label_id)
 
@@ -356,28 +367,26 @@ def tokenise_df(df: pd.DataFrame, split_name: str) -> HFDataset:
             input_ids      = enc["input_ids"]
             attention_mask = enc["attention_mask"]
 
-            # Build labels: mask the prompt prefix with -100 so only the
-            # answer token contributes to the loss
-            # (ported idea: only supervise the output token(s))
-            prefix_text = build_prompt_no_label(chunk_text)
-            prefix_len  = len(
-                tokenizer(
-                    prefix_text,
-                    truncation=True,
-                    max_length=SEQ_LEN,
-                    add_special_tokens=True,
-                )["input_ids"]
-            )
+            # ---- Label masking ----
+            # Tokenise the prompt-only string (no answer) to find where the
+            # answer starts. Everything before that position is masked.
+            # We tokenise WITHOUT padding so prefix_len is the exact count.
+            prefix_ids = tokenizer(
+                build_prompt_no_label(chunk_text),
+                truncation=True,
+                max_length=SEQ_LEN,
+                add_special_tokens=True,
+                padding=False,
+            )["input_ids"]
+            prefix_len = len(prefix_ids)   # answer starts at this index
 
-            labels = [-100] * prefix_len + input_ids[prefix_len:]
-            # Mask padding
+            # labels = input_ids everywhere, -100 for prompt + padding
             labels = [
-                tok if mask == 1 else -100
-                for tok, mask in zip(labels, attention_mask)
+                (tok if idx >= prefix_len and mask == 1 else -100)
+                for idx, (tok, mask) in enumerate(zip(input_ids, attention_mask))
             ]
-            # Pad labels to SEQ_LEN
-            labels = labels + [-100] * (SEQ_LEN - len(labels))
-            labels = labels[:SEQ_LEN]
+
+            supervised_lens.append(sum(1 for l in labels if l != -100))
 
             all_input_ids.append(input_ids)
             all_attention_mask.append(attention_mask)
@@ -394,8 +403,9 @@ def tokenise_df(df: pd.DataFrame, split_name: str) -> HFDataset:
 
     orig  = len(df)
     expnd = len(dataset)
+    avg_sup = sum(supervised_lens) / len(supervised_lens) if supervised_lens else 0
     print(f"  {split_name}: {orig:,} articles → {expnd:,} chunks "
-          f"(×{expnd/orig:.1f} expansion)")
+          f"(×{expnd/orig:.1f} expansion)  avg supervised tokens/chunk: {avg_sup:.1f}")
     return dataset
 
 
@@ -431,30 +441,48 @@ for lid, tid in LABEL_TOKEN_IDS.items():
 def compute_metrics(eval_pred: EvalPrediction):
     """
     Ported from sentiment_context_aware_finetune.py compute_metrics.
-    Extracts the predicted label from the first unmasked answer position.
+
+    Causal-LM shift: the Trainer returns logits of shape [N, SEQ_LEN, vocab].
+    logits[i] is the prediction FOR position i, i.e. the model uses tokens
+    0..i-1 to predict token i.  labels[i] is the target at position i.
+    So logits[pos] predicts labels[pos] — no extra shift needed here because
+    HuggingFace already aligns them before returning predictions.
+
+    We look for the FIRST unmasked position in labels (the answer token)
+    and read the corresponding logits row.
     """
     logits_all = eval_pred.predictions   # [N, SEQ_LEN, vocab]
     labels_all = eval_pred.label_ids     # [N, SEQ_LEN]
 
+    # Handle the case where Trainer returns a tuple (logits, past_key_values)
+    if isinstance(logits_all, tuple):
+        logits_all = logits_all[0]
+
     y_pred = []
     y_true = []
 
+    label_tok_ids = list(LABEL_TOKEN_IDS.values())
+
     for logits, labels in zip(logits_all, labels_all):
-        # Find the first position the model should predict (non -100)
-        valid_positions = np.where(labels != -100)[0]
+        # Find valid (non-masked) positions
+        valid_positions = np.where(np.array(labels) != -100)[0]
         if len(valid_positions) == 0:
             continue
-        pos = valid_positions[0]
 
-        # True label: decode label token id → class id
+        # The first valid position holds the label token
+        pos      = int(valid_positions[0])
         true_tok = int(labels[pos])
         true_cls = LABEL_TOKEN_ID_TO_LABEL.get(true_tok, -1)
         if true_cls == -1:
             continue
 
-        # Predicted: argmax over the label-token subset only
-        label_tok_ids = list(LABEL_TOKEN_IDS.values())
-        subset_logits = logits[pos, label_tok_ids]
+        # pos-1 is the logit position that predicts token at pos
+        # (causal LM: logits[i] predicts input_ids[i+1])
+        logit_pos = pos - 1
+        if logit_pos < 0 or logit_pos >= logits.shape[0]:
+            continue
+
+        subset_logits = logits[logit_pos, label_tok_ids]
         pred_idx      = int(np.argmax(subset_logits))
         pred_cls      = list(LABEL_TOKEN_IDS.keys())[pred_idx]
 
@@ -537,7 +565,7 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model="f1",          # macro-F1 (ported from BERT script)
     greater_is_better=True,
-    optim="adamw_torch_fused",
+    optim="adamw_torch",          # adamw_torch_fused has instability on ROCm
     weight_decay=0.01,
     max_grad_norm=1.0,
     seed=RANDOM_SEED,
@@ -554,6 +582,9 @@ trainer = Trainer(
     train_dataset=train_ds,
     eval_dataset=val_ds,
     compute_metrics=compute_metrics,
+    # Explicitly pass label_names — PEFT wraps the model and Trainer
+    # cannot infer them automatically, causing a harmless but noisy warning.
+    label_names=["labels"],
 )
 
 approx_steps = int(len(train_ds) * EPOCHS / (MICRO_BS * GRAD_ACC))
