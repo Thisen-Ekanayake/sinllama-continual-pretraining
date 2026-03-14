@@ -84,9 +84,16 @@ RANDOM_SEED = int(os.environ.get("RANDOM_SEED", "42"))
 USE_WANDB   = os.environ.get("USE_WANDB", "true").lower() != "false"
 
 # ---- Label map (fixed for this task) ----
-LABEL_NAMES = ["political", "business", "technology", "sports", "entertainment"]
-NUM_LABELS  = len(LABEL_NAMES)
-ID_TO_LABEL = {i: n for i, n in enumerate(LABEL_NAMES)}
+# NOTE: label names must each tokenise to a single distinct token in the
+# model vocabulary.  "entertainment" splits into multiple tokens in the
+# LLaMA tokeniser so we use "entertain" as the prompt/answer keyword and
+# map it back to the canonical name for display / CSV outputs.
+LABEL_NAMES        = ["political", "business", "technology", "sports", "entertainment"]
+LABEL_PROMPT_WORDS = ["political", "business", "technology", "sports", "entertain"]
+NUM_LABELS         = len(LABEL_NAMES)
+ID_TO_LABEL        = {i: n      for i, n in enumerate(LABEL_NAMES)}
+ID_TO_PROMPT_WORD  = {i: w      for i, w in enumerate(LABEL_PROMPT_WORDS)}
+PROMPT_WORD_TO_ID  = {w: i      for i, w in enumerate(LABEL_PROMPT_WORDS)}
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -131,6 +138,20 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, use_fast=True)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 print(f"✓ Tokenizer  vocab={tokenizer.vocab_size}  pad='{tokenizer.pad_token}'")
+
+# ---- Verify every prompt word is a single token ----
+# This must run after the tokenizer is loaded but before training starts.
+print("\nVerifying label prompt words tokenise to single tokens:")
+for lid, word in ID_TO_PROMPT_WORD.items():
+    toks = tokenizer(word, add_special_tokens=False)["input_ids"]
+    decoded = tokenizer.decode(toks)
+    status = "✓" if len(toks) == 1 else "✗ MULTI-TOKEN — change this word!"
+    print(f"  [{lid}] {LABEL_NAMES[lid]:14s} → prompt word '{word}' → {toks} ('{decoded}') {status}")
+    if len(toks) != 1:
+        raise ValueError(
+            f"Label prompt word '{word}' tokenises to {len(toks)} tokens {toks}. "
+            f"Replace it with a single-token word in LABEL_PROMPT_WORDS."
+        )
 
 # ============================================================
 # MODEL  (LoRA only — Stage 2)
@@ -191,13 +212,14 @@ def sliding_window_token_ids(
     return chunks if chunks else [token_ids[:chunk_size]]
 
 
-def build_prompt(text: str, label_name: str) -> str:
+def build_prompt(text: str, label_id: int) -> str:
     """Full prompt+answer string used for causal-LM training."""
+    word = ID_TO_PROMPT_WORD[label_id]
     return (
         f"Classify the following Sinhala news article into one of: "
-        f"political, business, technology, sports, entertainment.\n\n"
+        f"political, business, technology, sports, entertain.\n\n"
         f"Article: {text}\n"
-        f"Category: {label_name}{tokenizer.eos_token}"
+        f"Category: {word}{tokenizer.eos_token}"
     )
 
 
@@ -205,7 +227,7 @@ def build_prompt_no_label(text: str) -> str:
     """Prompt without answer — used to compute the label-only loss mask."""
     return (
         f"Classify the following Sinhala news article into one of: "
-        f"political, business, technology, sports, entertainment.\n\n"
+        f"political, business, technology, sports, entertain.\n\n"
         f"Article: {text}\n"
         f"Category:"
     )
@@ -262,7 +284,6 @@ def tokenise_df(df: pd.DataFrame, split_name: str) -> HFDataset:
 
     for _, row in df.iterrows():
         text       = str(row["text"])
-        label_name = str(row["label_name"])
         label_id   = int(row["label"])
 
         # Tokenise just the article body to decide chunking boundaries.
@@ -286,7 +307,7 @@ def tokenise_df(df: pd.DataFrame, split_name: str) -> HFDataset:
         for chunk_ids in body_chunks:
             # Decode chunk back to text so we can build the prompt cleanly
             chunk_text = tokenizer.decode(chunk_ids, skip_special_tokens=True)
-            full_text  = build_prompt(chunk_text, label_name)
+            full_text  = build_prompt(chunk_text, label_id)
 
             enc = tokenizer(
                 full_text,
@@ -355,17 +376,17 @@ test_ds  = tokenise_df(test_df,  "test")
 # compare predicted vs true label name token.
 # ============================================================
 
-# Pre-encode each label name to its first token id
+# Pre-encode each prompt word to its first token id
 LABEL_TOKEN_IDS = {
     label_id: tokenizer(
-        name, add_special_tokens=False
+        word, add_special_tokens=False
     )["input_ids"][0]
-    for label_id, name in ID_TO_LABEL.items()
+    for label_id, word in ID_TO_PROMPT_WORD.items()
 }
 LABEL_TOKEN_ID_TO_LABEL = {v: k for k, v in LABEL_TOKEN_IDS.items()}
-print(f"\nLabel → first-token mapping:")
+print(f"\nLabel → token mapping:")
 for lid, tid in LABEL_TOKEN_IDS.items():
-    print(f"  [{lid}] {ID_TO_LABEL[lid]:14s} → token_id={tid}  "
+    print(f"  [{lid}] {LABEL_NAMES[lid]:14s} ('{ID_TO_PROMPT_WORD[lid]}') → token_id={tid}  "
           f"'{tokenizer.decode([tid])}'")
 
 
@@ -461,7 +482,6 @@ training_args = TrainingArguments(
     output_dir=OUT_DIR,
     run_name=f"news_lora_lr{LR}_r{LORA_R}",
     bf16=True,
-    tf32=True,
     per_device_train_batch_size=MICRO_BS,
     per_device_eval_batch_size=MICRO_BS,
     gradient_accumulation_steps=GRAD_ACC,
