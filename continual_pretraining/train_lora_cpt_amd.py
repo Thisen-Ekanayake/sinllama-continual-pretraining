@@ -52,8 +52,8 @@ STAGE1_DIR     = os.environ.get("STAGE1_DIR",  os.path.join(OUT_DIR, "stage1"))
 STAGE2_DIR     = os.path.join(OUT_DIR, "stage2")
 
 SEQ_LEN        = int(os.environ.get("SEQ_LEN",   "1024"))
-MICRO_BS       = int(os.environ.get("MICRO_BS",  "8"))
-GRAD_ACC       = int(os.environ.get("GRAD_ACC",  "2"))
+MICRO_BS       = int(os.environ.get("MICRO_BS",  "16"))
+GRAD_ACC       = int(os.environ.get("GRAD_ACC",  "4"))
 DATA_PERC      = float(os.environ.get("DATA_PERC", "1.0"))
 
 S1_EPOCHS      = float(os.environ.get("S1_EPOCHS", "0.5"))
