@@ -52,21 +52,22 @@ STAGE1_DIR     = os.environ.get("STAGE1_DIR",  os.path.join(OUT_DIR, "stage1"))
 STAGE2_DIR     = os.path.join(OUT_DIR, "stage2")
 
 SEQ_LEN        = int(os.environ.get("SEQ_LEN",   "1024"))
-MICRO_BS       = int(os.environ.get("MICRO_BS",  "16"))
-GRAD_ACC       = int(os.environ.get("GRAD_ACC",  "4"))
+MICRO_BS       = int(os.environ.get("MICRO_BS",  "64"))
+GRAD_ACC       = int(os.environ.get("GRAD_ACC",  "2"))
 DATA_PERC      = float(os.environ.get("DATA_PERC", "1.0"))
 
-S1_EPOCHS      = float(os.environ.get("S1_EPOCHS", "0.5"))
-S2_EPOCHS      = float(os.environ.get("S2_EPOCHS", "1.0"))
+S1_EPOCHS      = float(os.environ.get("S1_EPOCHS", "3"))
+S2_EPOCHS      = float(os.environ.get("S2_EPOCHS", "6"))
 S1_LR          = float(os.environ.get("S1_LR",     "1e-4"))
-S2_LR          = float(os.environ.get("S2_LR",     "5e-5"))
+S2_LR          = float(os.environ.get("S2_LR",     "1e-4"))
 
 LORA_R         = int(os.environ.get("LORA_R",         "128"))
 EMBED_LR_SCALE = float(os.environ.get("EMBED_LR_SCALE", "10.0"))
 
-# "eager" is safest on ROCm.
+# "sdpa" uses PyTorch's scaled_dot_product_attention, available on ROCm without
+# extra dependencies and significantly faster than eager (avoids O(n²) naive impl).
 # Set ATTN_IMPL=flash_attention_2 if aotriton / ROCm FA is installed.
-ATTN_IMPL      = os.environ.get("ATTN_IMPL", "eager")
+ATTN_IMPL      = os.environ.get("ATTN_IMPL", "sdpa")
 
 SKIP_STAGE1    = os.environ.get("SKIP_STAGE1", "0") == "1"
 SKIP_STAGE2    = os.environ.get("SKIP_STAGE2", "0") == "1"
@@ -240,8 +241,9 @@ def run_stage1(tokenizer, train_packed, val_packed):
         per_device_train_batch_size=MICRO_BS,
         per_device_eval_batch_size=MICRO_BS,
         gradient_accumulation_steps=GRAD_ACC,
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        # Stage 1 only trains embeddings — 192 GB GPU has ample VRAM,
+        # so gradient checkpointing just adds ~33% recompute overhead for nothing.
+        gradient_checkpointing=False,
         learning_rate=S1_LR,
         warmup_ratio=0.05,
         lr_scheduler_type="linear",
