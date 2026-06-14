@@ -19,5 +19,11 @@ data/
 *.png
 *.csv
 *.md
+*.pyc
+*.safetensors
+*.bin
+*.model
+*.vocab
+*.npy
 
 !requirements.txt
