@@ -1,4 +1,7 @@
 #!/bin/bash
+export WANDB_PROJECT=sinllama-cpt
+run_name=sinllama-cpt-lora-r64
+
 lr=1e-4
 lora_rank=64
 lora_alpha=128
@@ -10,8 +13,10 @@ tokenizer_name_or_path=${pretrained_model}
 dataset_dir=data_dir
 data_cache=temp_data_cache_dir
 per_device_train_batch_size=1
+per_device_eval_batch_size=1
 gradient_accumulation_steps=8
 block_size=512
+eval_steps=200
 output_dir=output_dir
 
 torchrun --nnodes 1 --nproc_per_node 1 run_clm_pt_with_peft.py \
@@ -21,7 +26,9 @@ torchrun --nnodes 1 --nproc_per_node 1 run_clm_pt_with_peft.py \
     --data_cache_dir ${data_cache} \
     --validation_split_percentage 0.001 \
     --per_device_train_batch_size ${per_device_train_batch_size} \
+    --per_device_eval_batch_size ${per_device_eval_batch_size} \
     --do_train \
+    --do_eval \
     --low_cpu_mem_usage \
     --seed $RANDOM \
     --bf16 \
@@ -32,9 +39,14 @@ torchrun --nnodes 1 --nproc_per_node 1 run_clm_pt_with_peft.py \
     --weight_decay 0.01 \
     --logging_strategy steps \
     --logging_steps 10 \
+    --eval_strategy steps \
+    --eval_steps ${eval_steps} \
     --save_strategy steps \
     --save_total_limit 3 \
     --save_steps 200 \
+    --load_best_model_at_end True \
+    --metric_for_best_model eval_loss \
+    --greater_is_better False \
     --gradient_accumulation_steps ${gradient_accumulation_steps} \
     --preprocessing_num_workers 8 \
     --block_size ${block_size} \
@@ -48,4 +60,6 @@ torchrun --nnodes 1 --nproc_per_node 1 run_clm_pt_with_peft.py \
     --lora_dropout ${lora_dropout} \
     --torch_dtype bfloat16 \
     --load_in_kbits 16 \
+    --report_to wandb \
+    --run_name ${run_name} \
     --ddp_find_unused_parameters False
