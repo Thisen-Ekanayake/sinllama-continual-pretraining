@@ -12,9 +12,9 @@ pretrained_model=SinLlama_merged_bf16
 tokenizer_name_or_path=${pretrained_model}
 dataset_dir=data_dir
 data_cache=temp_data_cache_dir
-per_device_train_batch_size=1
-per_device_eval_batch_size=1
-gradient_accumulation_steps=8
+per_device_train_batch_size=8
+per_device_eval_batch_size=8
+gradient_accumulation_steps=1
 block_size=512
 eval_steps=5000
 output_dir=output_dir
@@ -50,6 +50,7 @@ torchrun --nnodes 1 --nproc_per_node 1 run_clm_pt_with_peft.py \
     --greater_is_better False \
     --gradient_accumulation_steps ${gradient_accumulation_steps} \
     --preprocessing_num_workers 8 \
+    --dataloader_num_workers 4 \
     --block_size ${block_size} \
     --output_dir ${output_dir} \
     --overwrite_output_dir \
