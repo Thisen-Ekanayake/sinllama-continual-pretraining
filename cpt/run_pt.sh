@@ -16,7 +16,7 @@ per_device_train_batch_size=1
 per_device_eval_batch_size=1
 gradient_accumulation_steps=8
 block_size=512
-eval_steps=200
+eval_steps=5000
 output_dir=output_dir
 
 torchrun --nnodes 1 --nproc_per_node 1 run_clm_pt_with_peft.py \
@@ -38,12 +38,13 @@ torchrun --nnodes 1 --nproc_per_node 1 run_clm_pt_with_peft.py \
     --warmup_ratio 0.05 \
     --weight_decay 0.01 \
     --logging_strategy steps \
-    --logging_steps 10 \
+    --logging_steps 100 \
     --eval_strategy steps \
     --eval_steps ${eval_steps} \
+    --label_names labels \
     --save_strategy steps \
     --save_total_limit 3 \
-    --save_steps 200 \
+    --save_steps 5000 \
     --load_best_model_at_end True \
     --metric_for_best_model eval_loss \
     --greater_is_better False \
