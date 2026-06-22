@@ -11,6 +11,8 @@
 
 export WANDB_PROJECT=sinllama-finetune
 export TOKENIZERS_PARALLELISM=false
+# Reduce CUDA fragmentation OOMs (the large 139k-vocab logits are memory-heavy).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ===================== shared / global =====================
 # Path to the merged final model (output of the LoRA-merge step).

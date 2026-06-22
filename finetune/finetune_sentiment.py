@@ -257,10 +257,10 @@ def parse_args():
     p.add_argument("--eval_steps", type=int, default=200)
     p.add_argument("--save_steps", type=int, default=200)
     p.add_argument("--save_total_limit", type=int, default=2)
-    # OFF by default: on a 46GB GPU, LoRA on an 8B model at bs8/seq512 fits without
-    # checkpointing, and disabling it removes the recompute-forward (~25-35% faster).
-    # Re-enable with --gradient_checkpointing if you hit OOM (e.g. larger batch/seq).
-    p.add_argument("--gradient_checkpointing", action=argparse.BooleanOptionalAction, default=False)
+    # ON by default: an 8B model + bs8/seq512 + the large 139k-vocab fp32 logits does
+    # NOT fit on a 44GB A40 without checkpointing (OOMs in the MLP). Disable with
+    # --no-gradient_checkpointing only on a bigger GPU or with a smaller batch.
+    p.add_argument("--gradient_checkpointing", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--load_in_4bit", action="store_true", default=False)
     p.add_argument("--seed", type=int, default=42)
     # wandb
