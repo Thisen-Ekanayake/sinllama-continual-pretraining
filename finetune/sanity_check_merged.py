@@ -10,12 +10,20 @@ Usage:
 """
 import argparse
 import math
+import os
+import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 p = argparse.ArgumentParser()
 p.add_argument("--model_name_or_path", default="/dev/shm/SinLlama_cpt_merged")
 args = p.parse_args()
+
+if not os.path.isdir(args.model_name_or_path):
+    sys.exit(
+        f"Model dir not found: {args.model_name_or_path}\n"
+        "Point --model_name_or_path at the merged model, e.g. 'SinLlama_cpt_merged',\n"
+        "or copy it to RAM first: cp -r SinLlama_cpt_merged /dev/shm/SinLlama_cpt_merged")
 
 tok = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=True)
 if tok.pad_token is None:
