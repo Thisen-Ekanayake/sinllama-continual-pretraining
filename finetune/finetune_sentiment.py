@@ -133,6 +133,47 @@ def load_split(data_dir, name):
     return df
 
 
+def compute_metrics(preds, golds, labels):
+    """Accuracy + per-label and micro/macro precision / recall / F1.
+
+    A prediction that could not be parsed into a known label (None) counts as wrong:
+    it adds a false negative to its gold class but no false positive to any class, so
+    micro-precision (correct / parsed) and micro-recall (correct / n) can differ.
+    """
+    n = len(golds)
+    correct = sum(1 for p, g in zip(preds, golds) if p == g)
+    num_unparsed = sum(1 for p in preds if p not in labels)
+
+    per_label = {}
+    macro_p = macro_r = macro_f1 = 0.0
+    for lab in labels:
+        tp = sum(1 for p, g in zip(preds, golds) if g == lab and p == lab)
+        fp = sum(1 for p, g in zip(preds, golds) if g != lab and p == lab)
+        fn = sum(1 for p, g in zip(preds, golds) if g == lab and p != lab)
+        prec = tp / (tp + fp) if (tp + fp) else 0.0
+        rec = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+        per_label[lab] = {"precision": prec, "recall": rec, "f1": f1,
+                          "support": sum(1 for g in golds if g == lab)}
+        macro_p += prec
+        macro_r += rec
+        macro_f1 += f1
+
+    k = len(labels) or 1
+    micro_p = correct / (n - num_unparsed) if (n - num_unparsed) else 0.0
+    micro_r = correct / n if n else 0.0
+    micro_f1 = 2 * micro_p * micro_r / (micro_p + micro_r) if (micro_p + micro_r) else 0.0
+
+    return {
+        "accuracy": correct / n if n else 0.0,
+        "n": n,
+        "num_unparsed": num_unparsed,
+        "micro_precision": micro_p, "micro_recall": micro_r, "micro_f1": micro_f1,
+        "macro_precision": macro_p / k, "macro_recall": macro_r / k, "macro_f1": macro_f1 / k,
+        "per_label": per_label,
+    }
+
+
 @torch.no_grad()
 def evaluate_accuracy(model, tokenizer, df, max_seq_length, batch_size, device):
     model.eval()
@@ -172,17 +213,11 @@ def evaluate_accuracy(model, tokenizer, df, max_seq_length, batch_size, device):
             preds.append(parse_prediction(tokenizer.decode(g, skip_special_tokens=True)))
         golds.extend(labels[start:start + batch_size])
 
-    correct = sum(1 for p, g in zip(preds, golds) if p == g)
-    acc = correct / len(golds) if golds else 0.0
-    per_label = {}
-    for lab in LABELS:
-        idx = [i for i, g in enumerate(golds) if g == lab]
-        if idx:
-            per_label[lab] = sum(1 for i in idx if preds[i] == lab) / len(idx)
-    return acc, per_label, preds, golds
+    metrics = compute_metrics(preds, golds, LABELS)
+    return metrics, preds, golds
 
 
-def write_results_report(path, args, train_result, trainer, acc, per_label, samples):
+def write_results_report(path, args, train_result, trainer, metrics, samples):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     best_eval_loss = getattr(trainer.state, "best_metric", None)
     global_step = getattr(trainer.state, "global_step", None)
@@ -215,9 +250,17 @@ def write_results_report(path, args, train_result, trainer, acc, per_label, samp
     lines.append(f"  train_loss              : {tm.get('train_loss')}")
     lines.append("")
     lines.append("[TEST RESULTS]")
-    lines.append(f"  overall_accuracy        : {acc:.4f}")
-    for lab, a in per_label.items():
-        lines.append(f"  acc[{lab}]".ljust(26) + f": {a:.4f}")
+    lines.append(f"  accuracy                : {metrics['accuracy']:.4f}  "
+                 f"(n={metrics['n']}, unparsed={metrics['num_unparsed']})")
+    lines.append(f"  precision (micro/macro) : {metrics['micro_precision']:.4f} / {metrics['macro_precision']:.4f}")
+    lines.append(f"  recall    (micro/macro) : {metrics['micro_recall']:.4f} / {metrics['macro_recall']:.4f}")
+    lines.append(f"  f1        (micro/macro) : {metrics['micro_f1']:.4f} / {metrics['macro_f1']:.4f}")
+    lines.append("")
+    lines.append("  per-label    precision     recall         f1    support")
+    for lab in LABELS:
+        m = metrics["per_label"][lab]
+        lines.append(f"    {str(lab):10s} {m['precision']:10.4f} {m['recall']:10.4f} "
+                     f"{m['f1']:10.4f} {m['support']:10d}")
     lines.append("")
     lines.append("[SAMPLE PREDICTIONS]  (gold | pred | text)")
     for text, gold, pred in samples:
@@ -362,24 +405,39 @@ def main():
     trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
 
-    print("Evaluating exact-match accuracy on the test set ...")
-    acc, per_label, preds, golds = evaluate_accuracy(
+    # Final generation-based metrics on the test set
+    print("Evaluating metrics on the test set ...")
+    metrics, preds, golds = evaluate_accuracy(
         model, tokenizer, test_df, args.max_seq_length,
         args.per_device_eval_batch_size, model.device)
-    print(f"TEST accuracy = {acc:.4f}")
-    for lab, a in per_label.items():
-        print(f"  {lab:10s}: {a:.4f}")
+    print(f"TEST accuracy={metrics['accuracy']:.4f}  "
+          f"P(micro/macro)={metrics['micro_precision']:.4f}/{metrics['macro_precision']:.4f}  "
+          f"R(micro/macro)={metrics['micro_recall']:.4f}/{metrics['macro_recall']:.4f}  "
+          f"F1(micro/macro)={metrics['micro_f1']:.4f}/{metrics['macro_f1']:.4f}")
+    for lab in LABELS:
+        m = metrics["per_label"][lab]
+        print(f"  {str(lab):10s} P={m['precision']:.4f} R={m['recall']:.4f} "
+              f"F1={m['f1']:.4f} (n={m['support']})")
 
     samples = list(zip(test_df[TEXT_COL].tolist()[:15], golds[:15], preds[:15]))
     results_file = args.results_file or os.path.join(args.output_dir, f"results_{TASK}.txt")
-    write_results_report(results_file, args, train_result, trainer, acc, per_label, samples)
+    write_results_report(results_file, args, train_result, trainer, metrics, samples)
 
     try:
         import wandb
         if wandb.run is not None:
-            wandb.log({"test/accuracy": acc,
-                       **{f"test/acc_{lab}": a for lab, a in per_label.items()}})
-            wandb.run.summary["test_accuracy"] = acc
+            wandb.log({
+                "test/accuracy": metrics["accuracy"],
+                "test/precision_micro": metrics["micro_precision"],
+                "test/precision_macro": metrics["macro_precision"],
+                "test/recall_micro": metrics["micro_recall"],
+                "test/recall_macro": metrics["macro_recall"],
+                "test/f1_micro": metrics["micro_f1"],
+                "test/f1_macro": metrics["macro_f1"],
+                **{f"test/f1_{lab}": metrics["per_label"][lab]["f1"] for lab in LABELS},
+            })
+            wandb.run.summary["test_accuracy"] = metrics["accuracy"]
+            wandb.run.summary["test_f1_macro"] = metrics["macro_f1"]
     except Exception as e:
         print(f"wandb logging skipped: {e}")
 
