@@ -18,6 +18,9 @@ Example:
 import argparse
 import os
 
+# Avoid the "tokenizers fork after parallelism" warning/deadlock with DataLoader workers.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -250,7 +253,10 @@ def parse_args():
     p.add_argument("--eval_steps", type=int, default=100)
     p.add_argument("--save_steps", type=int, default=100)
     p.add_argument("--save_total_limit", type=int, default=2)
-    p.add_argument("--gradient_checkpointing", action="store_true", default=True)
+    # OFF by default: on a 46GB GPU, LoRA on an 8B model at bs8/seq512 fits without
+    # checkpointing, and disabling it removes the recompute-forward (~25-35% faster).
+    # Re-enable with --gradient_checkpointing if you hit OOM (e.g. larger batch/seq).
+    p.add_argument("--gradient_checkpointing", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--load_in_4bit", action="store_true", default=False)
     p.add_argument("--seed", type=int, default=42)
     # wandb
@@ -335,6 +341,8 @@ def main():
         run_name=args.run_name,
         seed=args.seed,
         dataloader_num_workers=4,
+        # Batch sequences of similar length together to cut padding waste.
+        group_by_length=True,
     )
 
     trainer = Trainer(
