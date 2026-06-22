@@ -10,10 +10,25 @@
 # Edit the variables below to change paths / hyperparameters.
 
 export WANDB_PROJECT=sinllama-finetune
+export TOKENIZERS_PARALLELISM=false
 
 # ===================== shared / global =====================
 # Path to the merged final model (output of the LoRA-merge step).
 MERGED_MODEL=../SinLlama_cpt_merged
+
+# /workspace is a slow MooseFS network volume (~46 MB/s), and each task below
+# reloads the 16GB model. Copy it once to RAM-backed /dev/shm so all three tasks
+# load in seconds instead of ~6 min each. Set FAST_LOAD=0 to skip.
+FAST_LOAD=${FAST_LOAD:-1}
+if [ "$FAST_LOAD" = "1" ]; then
+    LOCAL_MODEL=/dev/shm/SinLlama_cpt_merged
+    if [ ! -f "$LOCAL_MODEL/config.json" ]; then
+        echo "Copying merged model to $LOCAL_MODEL (one-time, ~6 min over network)..."
+        rm -rf "$LOCAL_MODEL"
+        cp -r "$MERGED_MODEL" "$LOCAL_MODEL"
+    fi
+    MERGED_MODEL="$LOCAL_MODEL"
+fi
 
 # The three dataset directories.
 WRITING_DATA_DIR=../data/Writing
