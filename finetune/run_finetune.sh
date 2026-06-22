@@ -13,12 +13,12 @@ export WANDB_PROJECT=sinllama-finetune
 
 # ===================== shared / global =====================
 # Path to the merged final model (output of the LoRA-merge step).
-MERGED_MODEL=models/SinLlama_cpt_merged
+MERGED_MODEL=../SinLlama_cpt_merged
 
 # The three dataset directories.
-WRITING_DATA_DIR=data/Writing
-SENT_DATA_DIR=data/sentiment
-NEWS_DATA_DIR=data/news
+WRITING_DATA_DIR=../data/Writing
+SENT_DATA_DIR=../data/sentiment
+NEWS_DATA_DIR=../data/news
 
 # Where the run artifacts (adapters + results_<task>.txt) are written.
 WRITING_OUTPUT_DIR=runs/writing_style_lora
