@@ -42,20 +42,28 @@ TEXT_COL = "comments"
 LABEL_COL = "labels"
 LABELS = ["0", "1", "2", "3", "4"]
 
+# Alpaca instruct template (matches the SinLlama paper, Fig. 1): the task
+# description goes in ### Instruction and the comment goes in ### Input.
 PROMPT_PREFIX = (
+    "Below is an instruction that describes a task, paired with an input that "
+    "provides further context. Write a response that appropriately completes "
+    "the request.\n\n"
+    "### Instruction:\n"
     "You are an NLP assistant whose purpose is to classify Sinhala comments "
     "into predefined categories. The categories are as follows: (Political: 0, "
     "Business: 1, Technology: 2, Sports: 3, Entertainment: 4) Given a Sinhala "
     "comment, your task is to determine which category it belongs to. Please "
     "only give the label as a number (0, 1, 2, 3, or 4) that best represents "
-    "the comment's category. comment: "
+    "the comment's category.\n\n"
+    "### Input:\n"
 )
-PROMPT_SUFFIX = " answer:"
+PROMPT_SUFFIX = "\n\n### Response:\n"
 
 
 def build_answer(label_value) -> str:
-    # labels may load as int/float; normalise to a single digit string
-    return " " + str(int(float(str(label_value).strip())))
+    # labels may load as int/float; normalise to a single digit string.
+    # the answer follows "### Response:\n"
+    return str(int(float(str(label_value).strip())))
 
 
 def parse_prediction(generated_text: str):
