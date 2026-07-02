@@ -27,6 +27,11 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from evaluate_sinhala_mmlu import load_template, build_examples
 
+try:
+    from tqdm import tqdm
+except Exception:                                    # pragma: no cover
+    def tqdm(x, **k): return x
+
 
 def load(path):
     """Load exactly like the eval does (bf16, left padding/truncation)."""
@@ -86,7 +91,7 @@ def main():
     print(f"Inspecting {len(valid)} prompt(s); showing top-{args.topk} next "
           f"tokens at the answer position.\n")
 
-    for mpath in models:
+    for mpath in tqdm(models, desc="Models", unit="model"):
         name = os.path.basename(mpath.rstrip("/"))
         print("=" * 80)
         print(f"MODEL: {name}   ({mpath})")
