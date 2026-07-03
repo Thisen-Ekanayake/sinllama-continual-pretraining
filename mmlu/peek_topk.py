@@ -32,6 +32,9 @@ try:
 except Exception:                                    # pragma: no cover
     def tqdm(x, **k): return x
 
+# repo root = parent of the directory holding this script (<repo>/mmlu/peek_topk.py)
+DEFAULT_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def load(path):
     """Load exactly like the eval does (bf16, left padding/truncation)."""
@@ -59,8 +62,7 @@ def topk_next(model, tok, prompt, k, max_len):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--project-dir",
-                    default="/sinllama-continual-pretraining")
+    ap.add_argument("--project-dir", default=DEFAULT_PROJECT_DIR)
     ap.add_argument("--data-root", default=None,
                     help="SinhalaMMLU dir (default: <project-dir>/SinhalaMMLU)")
     ap.add_argument("--prompt-file", default="prompt.txt")
@@ -87,7 +89,10 @@ def main():
     records, _ = build_examples(data_root, template, args.kshot)
     valid = [r for r in records if r["valid"]][:args.n_prompts]
     if not valid:
-        raise SystemExit(f"No valid prompts found under {data_root}")
+        raise SystemExit(
+            f"No questions parsed from {data_root} "
+            f"(expected {data_root}/TEST/<easy|medium|hard>/*.json). "
+            f"Pass --data-root or --project-dir if the dataset is elsewhere.")
     print(f"Inspecting {len(valid)} prompt(s); showing top-{args.topk} next "
           f"tokens at the answer position.\n")
 
