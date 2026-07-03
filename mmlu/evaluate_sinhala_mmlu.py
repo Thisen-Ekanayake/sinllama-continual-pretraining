@@ -23,7 +23,7 @@ Method
 Outputs (per model): a human-readable *_results.txt, a machine-readable
 *_metrics.json and a *_predictions.jsonl. Finally a combined results.md.
 """
-import os, re, json, glob, time, argparse, gc
+import os, re, json, glob, time, argparse, gc, shutil, subprocess
 from collections import defaultdict
 
 import torch
@@ -413,6 +413,33 @@ def write_results_md(path, all_metrics, meta):
     open(path, "w", encoding="utf-8").write("\n".join(L))
 
 
+# ----------------------------------------------------------------------------- #
+# GCS upload
+# ----------------------------------------------------------------------------- #
+def per_model_files(out_dir, name):
+    """The result files a single model produces, that currently exist on disk."""
+    sfx = ("_metrics.json", "_results.md", "_results.txt", "_predictions.jsonl")
+    return [os.path.join(out_dir, name + s) for s in sfx
+            if os.path.exists(os.path.join(out_dir, name + s))]
+
+
+def gcs_cp(files, dest):
+    """Copy files to a GCS dest (e.g. gs://bucket/<model>/ or the bucket root).
+    No-op if there is nothing to send or gsutil is unavailable; on failure it
+    warns rather than aborting the whole evaluation."""
+    files = [f for f in files if f]
+    if not files:
+        return
+    if shutil.which("gsutil") is None:
+        print("  (gsutil not found — skipping upload)")
+        return
+    try:
+        subprocess.run(["gsutil", "-m", "cp", *files, dest], check=True)
+        print(f"  uploaded {len(files)} file(s) -> {dest}")
+    except subprocess.CalledProcessError as e:
+        print(f"  WARNING: gsutil upload failed -> {dest}: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-root", default="SinhalaMMLU")
@@ -433,6 +460,12 @@ def main():
     ap.add_argument("--skip-existing", action="store_true",
                     help="reuse an existing <model>_metrics.json instead of "
                          "re-running that model")
+    ap.add_argument("--bucket", default="",
+                    help="GCS bucket/prefix; each model's files are uploaded to "
+                         "<bucket>/<model_name>/ as soon as it finishes")
+    ap.add_argument("--combine-only", action="store_true",
+                    help="skip evaluation: just rebuild (and upload) the combined "
+                         "results.md from existing <model>_metrics.json files")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -454,6 +487,27 @@ def main():
         print(f"WARNING: no few-shot match for: {sorted(missing)}")
 
     gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+
+    if args.combine_only:                    # rebuild the combined report only
+        all_metrics = {}
+        for path in args.models:
+            name = os.path.basename(path.rstrip("/"))
+            mpath = os.path.join(args.out_dir, f"{name}_metrics.json")
+            if os.path.exists(mpath):
+                all_metrics[name] = json.load(open(mpath, encoding="utf-8"))
+            else:
+                print(f"  (combine) missing {mpath} — skipping")
+        if not all_metrics:
+            raise SystemExit("combine-only: no *_metrics.json found in --out-dir")
+        meta = dict(k=args.kshot, gpu=gpu, total=n_valid,
+                    skipped_note=f"{n_skip} malformed answers excluded")
+        rpath = os.path.join(args.out_dir, "results.md")
+        write_results_md(rpath, all_metrics, meta)
+        if args.bucket:
+            gcs_cp([rpath], args.bucket.rstrip("/") + "/")
+        print(f"Wrote combined {rpath}")
+        return
+
     all_metrics = {}
     for path in args.models:
         name = os.path.basename(path.rstrip("/"))
@@ -462,6 +516,7 @@ def main():
         mpath = os.path.join(args.out_dir, f"{name}_metrics.json")
         if args.skip_existing and os.path.exists(mpath):
             m = json.load(open(mpath, encoding="utf-8"))
+            m["format"] = fmt
             print(f"\n=== {name}: reusing cached metrics "
                   f"({m['overall']['accuracy']:.2f}%) ===")
         else:
@@ -474,6 +529,7 @@ def main():
                     r["prompt"] = to_alpaca(r["prompt"])
             evaluate(model, tok, records, args.batch_size, args.max_len)
             m = compute_metrics(records)
+            m["format"] = fmt                          # persist into metrics.json
             print(f"  {name}: {m['overall']['accuracy']:.2f}%  "
                   f"({m['overall']['correct']}/{m['overall']['total']}) "
                   f"in {time.time()-t0:.0f}s")
@@ -489,14 +545,21 @@ def main():
             del model
             gc.collect(); torch.cuda.empty_cache()
 
-        m["format"] = fmt
         all_metrics[name] = m
         write_txt(os.path.join(args.out_dir, f"{name}_results.txt"), name, m)
         write_md(os.path.join(args.out_dir, f"{name}_results.md"), name, m)
+        if args.bucket:                        # upload as soon as this model is done
+            gcs_cp(per_model_files(args.out_dir, name),
+                   args.bucket.rstrip("/") + f"/{name}/")
 
     meta = dict(k=args.kshot, gpu=gpu, total=n_valid,
                 skipped_note=f"{n_skip} malformed answers excluded")
-    write_results_md(os.path.join(args.out_dir, "results.md"), all_metrics, meta)
+    rpath = os.path.join(args.out_dir, "results.md")
+    write_results_md(rpath, all_metrics, meta)
+    # only multi-model (and the combine-only) passes own the combined report, so
+    # parallel single-model runs don't clobber it in the bucket root
+    if args.bucket and len(args.models) > 1:
+        gcs_cp([rpath], args.bucket.rstrip("/") + "/")
     print(f"\nWrote results to {args.out_dir}/  (results.md + per-model files)")
 
 
