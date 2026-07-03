@@ -14,6 +14,11 @@ Method
   SinhalaMMLU paper uses for open models). We build the context ending in
   "පිළිතුර: " (trailing space) and, from a single forward pass, compare the
   next-token logits of the single-token digits 1..N. argmax -> predicted option.
+* Prompt format: each model is scored in the format it expects. Base/CPT models
+  use the raw template above; any model named via --alpaca-models (the Bactrian-X
+  instruct model, which was SFT'd on the Alpaca template) is re-wrapped in the
+  "### Instruction / ### Input / ### Response" scaffold. The digit-scoring step is
+  identical either way — only the surrounding text changes.
 
 Outputs (per model): a human-readable *_results.txt, a machine-readable
 *_metrics.json and a *_predictions.jsonl. Finally a combined results.md.
@@ -101,6 +106,37 @@ def render(template, subject, question, choices, answer=None):
     if answer is None:
         return block + " "                     # test question -> predict digit
     return block + " " + str(answer)           # exemplar with gold answer
+
+
+# ----------------------------------------------------------------------------- #
+# Alpaca-format wrapping (for instruction-tuned models fine-tuned on the Alpaca
+# template, e.g. SinLlama_Backtrianx_instruct — see 158_P_Finetunning_BacterianX).
+# to_alpaca() re-wraps an already-built (few-shot) raw prompt block-by-block; the
+# trailing "පිළිතුර: " of the test block is preserved so digit-scoring is unchanged.
+# ----------------------------------------------------------------------------- #
+ALPACA_PROMPT = (
+    "Below is an instruction that describes a task, paired with an input that "
+    "provides further context. Write a response that appropriately completes "
+    "the request.\n\n"
+    "### Instruction:\n{}\n\n### Input:\n{}\n\n### Response:\n{}")
+
+
+def block_to_alpaca(block):
+    """Re-wrap one rendered MMLU block into the Alpaca template: instruction =
+    task line, input = question+options, response = the 'පිළිතුර: ...' tail."""
+    before, cue, after = block.rpartition("පිළිතුර:")   # cue only at the answer slot
+    instr, _, qbody = before.partition("\nප්‍රශ්නය:")
+    instruction = instr.strip()
+    input_text = ("ප්‍රශ්නය:" + qbody).strip()
+    response = cue + after                               # "පිළිතුර: " or "පිළිතුර: 3"
+    return ALPACA_PROMPT.format(instruction, input_text, response)
+
+
+def to_alpaca(raw_prompt):
+    """Re-wrap every block of a (few-shot) prompt. Blocks are joined by blank
+    lines and clean() strips internal newlines, so the split is safe; the
+    trailing space of the final (test) block is preserved for digit-scoring."""
+    return "\n\n".join(block_to_alpaca(b) for b in raw_prompt.split("\n\n"))
 
 
 def build_fewshot_index(data_root, k):
@@ -282,7 +318,7 @@ def write_md(path, name, m):
     L = [f"# SinhalaMMLU — {name}\n",
          f"**Overall accuracy: {o['accuracy']:.2f}%** "
          f"({o['correct']}/{o['total']}) · {m['skipped']} malformed skipped · "
-         f"3-shot · bf16\n"]
+         f"3-shot · bf16 · {m.get('format', 'raw')} prompt\n"]
 
     def section(title, table, order=None):
         L.append(f"\n## {title}\n")
@@ -334,14 +370,17 @@ def write_results_md(path, all_metrics, meta):
     L.append(f"- Setting: **{meta['k']}-shot**, official prompt template, "
              f"answer chosen by highest option-digit probability")
     L.append(f"- Precision: **bf16** on {meta['gpu']}")
+    L.append(f"- Prompt format: base/CPT models scored **raw**; instruct models "
+             f"scored in their **Alpaca SFT template** (see the *Format* column)")
     L.append(f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     # Overall
     L.append("## Overall accuracy\n")
-    L.append(md_table(["Model", "Accuracy", "Correct", "Total"],
+    L.append(md_table(["Model", "Accuracy", "Correct", "Total", "Format"],
                       [[n, f"{all_metrics[n]['overall']['accuracy']:.2f}%",
                         all_metrics[n]['overall']['correct'],
-                        all_metrics[n]['overall']['total']] for n in names]))
+                        all_metrics[n]['overall']['total'],
+                        all_metrics[n].get('format', 'raw')] for n in names]))
 
     # By difficulty
     L.append("\n## Accuracy by difficulty\n")
@@ -379,11 +418,16 @@ def main():
     ap.add_argument("--data-root", default="SinhalaMMLU")
     ap.add_argument("--prompt-file", default="prompt.txt")
     ap.add_argument("--models", nargs="+",
-                    default=["SinLlama_cpt_merged", "SinLlama_Backtrianx_instruct"])
-    ap.add_argument("--out-dir", default="mmlu_eval/results")
+                    default=["llama-3-8b", "SinLlama_v01",
+                             "SinLlama_cpt_merged", "SinLlama_Backtrianx_instruct"])
+    ap.add_argument("--alpaca-models", nargs="*", default=[],
+                    help="model-name substrings to score in the Alpaca "
+                         "### Instruction/Input/Response template they were SFT'd "
+                         "on (e.g. SinLlama_Backtrianx_instruct)")
+    ap.add_argument("--out-dir", default="results")
     ap.add_argument("--kshot", type=int, default=3)
-    ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--max-len", type=int, default=3500)
+    ap.add_argument("--batch-size", type=int, default=16)   # bump on large GPUs
+    ap.add_argument("--max-len", type=int, default=4096)
     ap.add_argument("--limit", type=int, default=0,
                     help="cap questions per TEST file (0=all) for a smoke test")
     ap.add_argument("--skip-existing", action="store_true",
@@ -413,16 +457,21 @@ def main():
     all_metrics = {}
     for path in args.models:
         name = os.path.basename(path.rstrip("/"))
+        use_alpaca = any(s in name for s in args.alpaca_models)
+        fmt = "alpaca" if use_alpaca else "raw"
         mpath = os.path.join(args.out_dir, f"{name}_metrics.json")
         if args.skip_existing and os.path.exists(mpath):
             m = json.load(open(mpath, encoding="utf-8"))
             print(f"\n=== {name}: reusing cached metrics "
                   f"({m['overall']['accuracy']:.2f}%) ===")
         else:
-            print(f"\n=== Evaluating {name} ===")
+            print(f"\n=== Evaluating {name}  (prompt format: {fmt}) ===")
             t0 = time.time()
             model, tok = load_model(path)
             records = [dict(r) for r in records0]      # fresh copy per model
+            if use_alpaca:                             # re-wrap in the SFT template
+                for r in records:
+                    r["prompt"] = to_alpaca(r["prompt"])
             evaluate(model, tok, records, args.batch_size, args.max_len)
             m = compute_metrics(records)
             print(f"  {name}: {m['overall']['accuracy']:.2f}%  "
@@ -440,6 +489,7 @@ def main():
             del model
             gc.collect(); torch.cuda.empty_cache()
 
+        m["format"] = fmt
         all_metrics[name] = m
         write_txt(os.path.join(args.out_dir, f"{name}_results.txt"), name, m)
         write_md(os.path.join(args.out_dir, f"{name}_results.md"), name, m)
