@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-PROJECT_DIR="/workspace/sinllama-continual-pretraining"
+PROJECT_DIR="/sinllama-continual-pretraining"
 EVAL_DIR="$PROJECT_DIR/mmlu_eval"
 DATA_ROOT="$PROJECT_DIR/SinhalaMMLU"
 OUT_DIR="$EVAL_DIR/results"
