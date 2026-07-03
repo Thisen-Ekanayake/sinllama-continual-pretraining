@@ -60,7 +60,7 @@ def topk_next(model, tok, prompt, k, max_len):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project-dir",
-                    default="/workspace/sinllama-continual-pretraining")
+                    default="/sinllama-continual-pretraining")
     ap.add_argument("--data-root", default=None,
                     help="SinhalaMMLU dir (default: <project-dir>/SinhalaMMLU)")
     ap.add_argument("--prompt-file", default="prompt.txt")
