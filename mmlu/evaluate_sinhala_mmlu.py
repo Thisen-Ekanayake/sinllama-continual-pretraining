@@ -215,9 +215,13 @@ def load_model(path):
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"          # keep answer cue at the sequence end
     tok.truncation_side = "left"       # drop few-shot first if over length
+    # IMPORTANT: eager, not sdpa. On this ROCm/transformers stack the SDPA kernel
+    # mis-handles left-padding masks in batched inference — it collapses every
+    # prediction to the first option (verified on English MMLU: sdpa all-"A" acc
+    # 0.32 vs eager acc 0.70). Batched left-padded scoring must use eager here.
     model = AutoModelForCausalLM.from_pretrained(
         path, torch_dtype=torch.bfloat16, device_map="auto",
-        attn_implementation="sdpa")
+        attn_implementation="eager")
     model.eval()
     return model, tok
 
