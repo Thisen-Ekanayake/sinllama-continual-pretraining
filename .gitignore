@@ -25,5 +25,7 @@ data/
 *.model
 *.vocab
 *.npy
+*.tex
+*.webp
 
 !requirements.txt
