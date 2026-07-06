@@ -8,6 +8,7 @@ sinllama_merged_fp32_cpu/
 unsloth_compiled_cache/
 OASST2/
 data/
+models/
 
 .env
 *.txt
