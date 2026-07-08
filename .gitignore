@@ -9,6 +9,7 @@ unsloth_compiled_cache/
 OASST2/
 data/
 models/
+executed/
 
 .env
 *.txt
