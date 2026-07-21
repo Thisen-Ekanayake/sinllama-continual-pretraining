@@ -10,17 +10,16 @@ scoring = highest next-token probability among the answer-option tokens (digit
 context ending in the answer cue. base/CPT models are scored raw; the
 Bactrian-X instruct model is re-wrapped in the Alpaca template it was SFT'd on.
 
-Difference from the MMLU scripts: this machine is an RTX 4060 (8GB VRAM), so
-models are loaded 4-bit quantized (bitsandbytes NF4) instead of full bf16.
-There is no dev/fewshot split for Global-PIQA, so evaluation is zero-shot.
+Difference from the MMLU scripts: models are loaded in bf16 by default here
+(--quant bf16/4bit/8bit — see load_model()), since this benchmark commonly
+runs on VRAM-constrained boxes as well as full-size cloud GPUs. There is no
+dev/fewshot split for Global-PIQA, so evaluation is zero-shot.
 """
 import os, re, csv, json, time, gc, shutil, subprocess
 from collections import defaultdict
 
-# Loading an 8B model 4-bit still briefly peaks around ~6.7GB (measured) while
-# bitsandbytes materializes/quantizes each shard's tensors, before settling to
-# ~5.7GB resident. On an 8GB GPU that peak leaves little headroom, so reduce
-# allocator fragmentation overhead (must be set before the first CUDA call).
+# Reduce allocator fragmentation overhead across the sequential model loads in
+# a single process (must be set before the first CUDA call).
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
@@ -146,16 +145,19 @@ def to_alpaca(raw_prompt, block_fn):
 
 
 # ----------------------------------------------------------------------------- #
-# Model loading — 4-bit (NF4) quantized via bitsandbytes, to fit an 8B model
-# comfortably in 8GB VRAM (RTX 4060). eager attention (not sdpa): verified on
-# the MMLU evals that sdpa mis-handles left-padding masks in batched inference
-# and collapses every prediction to the first option; eager scores correctly.
+# Model loading — bf16 by default (cloud GPU, e.g. 20GB RTX 4000 Ada: an 8B
+# model in bf16 is ~16GB resident, comfortably clear of a quantized load's
+# accuracy trade-off). 4-bit/8-bit (bitsandbytes) remain available via --quant
+# for VRAM-constrained boxes (e.g. an 8GB RTX 4060 laptop). eager attention
+# (not sdpa): verified on the MMLU evals that sdpa mis-handles left-padding
+# masks in batched inference and collapses every prediction to the first
+# option; eager scores correctly, regardless of precision.
 # ----------------------------------------------------------------------------- #
-def load_model(path, quant="4bit"):
+def load_model(path, quant="bf16"):
     if not torch.cuda.is_available():
-        raise SystemExit("CUDA GPU required (models are loaded quantized for GPU inference).")
+        raise SystemExit("CUDA GPU required for inference.")
     # Squeeze out any cached-but-unused memory from a prior model (in the same
-    # process) before the load-time peak, since headroom is tight on 8GB.
+    # process) before loading the next one.
     gc.collect()
     torch.cuda.empty_cache()
     try:
@@ -173,18 +175,19 @@ def load_model(path, quant="4bit"):
     tok.padding_side = "left"          # keep answer cue at the sequence end
     tok.truncation_side = "left"       # drop context from the front if over length
 
-    if quant == "4bit":
-        bnb = BitsAndBytesConfig(
+    kwargs = dict(device_map={"": 0}, attn_implementation="eager")
+    if quant == "bf16":
+        kwargs["torch_dtype"] = torch.bfloat16
+    elif quant == "4bit":
+        kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
     elif quant == "8bit":
-        bnb = BitsAndBytesConfig(load_in_8bit=True)
+        kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
     else:
         raise ValueError(f"unknown quant mode: {quant}")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        path, quantization_config=bnb, device_map={"": 0},
-        attn_implementation="eager")
+    model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
     model.eval()
     return model, tok
 
@@ -335,12 +338,17 @@ def write_txt(path, title, name, m, sections):
     open(path, "w", encoding="utf-8").write("\n".join(L))
 
 
+QUANT_LABELS = {"bf16": "bf16", "4bit": "4-bit NF4 (bitsandbytes)",
+                "8bit": "8-bit (bitsandbytes)"}
+
+
 def write_md(path, title, name, m, sections):
     o = m["overall"]
     L = [f"# {title} — {name}\n",
          f"**Overall accuracy: {o['accuracy']:.2f}%** "
          f"({o['correct']}/{o['total']}) · {m['skipped']} skipped · "
-         f"zero-shot · 4-bit NF4 · {m.get('format', 'raw')} prompt\n"]
+         f"zero-shot · {QUANT_LABELS.get(m.get('quant'), m.get('quant', 'bf16'))} · "
+         f"{m.get('format', 'raw')} prompt\n"]
 
     def section(title_s, table, order=None):
         L.append(f"\n## {title_s}\n")
@@ -361,7 +369,8 @@ def write_results_md(path, title, all_metrics, meta, sections):
     L.append(f"- Benchmark: **{meta['bench']}** ({meta['total']} evaluated MCQs)")
     L.append(f"- Setting: **zero-shot**, answer chosen by highest option-token "
              f"probability")
-    L.append(f"- Precision: **4-bit NF4** (bitsandbytes) on {meta['gpu']}")
+    L.append(f"- Precision: **{QUANT_LABELS.get(meta.get('quant'), meta.get('quant', 'bf16'))}** "
+             f"on {meta['gpu']}")
     L.append(f"- Prompt format: base/CPT models scored **raw**; the instruct "
              f"model scored in its **Alpaca SFT template** (see the *Format* column)")
     L.append(f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")

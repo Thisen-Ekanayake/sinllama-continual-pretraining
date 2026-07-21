@@ -8,8 +8,8 @@ on the English half of global-piqa-parallel (mrlbenchmarks/global-piqa-parallel)
 Method (see common.py docstring): zero-shot, 4-way MCQ, scored by highest
 next-token probability among the single-token option letters " A".." D" after
 "Answer:". base/CPT/llama scored raw; the instruct model (--alpaca-models) is
-re-wrapped in the Alpaca template it was SFT'd on. Models are loaded 4-bit
-(bitsandbytes NF4) to fit an 8B model on an 8GB-VRAM RTX 4060.
+re-wrapped in the Alpaca template it was SFT'd on. Models are loaded in
+bf16 by default (--quant bf16/4bit/8bit).
 """
 import os, json, time, argparse
 import pandas as pd
@@ -45,7 +45,7 @@ def main():
     ap.add_argument("--out-dir", default="results_parallel_english")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--max-len", type=int, default=768)
-    ap.add_argument("--quant", choices=["4bit", "8bit"], default="4bit")
+    ap.add_argument("--quant", choices=["bf16", "4bit", "8bit"], default="bf16")
     ap.add_argument("--limit", type=int, default=0, help="cap #questions (0=all), for a smoke test")
     ap.add_argument("--skip-existing", action="store_true")
     ap.add_argument("--bucket", default="", help="GCS bucket/prefix (optional upload)")
@@ -77,7 +77,7 @@ def main():
                 print(f"  (combine) missing {mpath} — skipping")
         if not all_metrics:
             raise SystemExit("combine-only: no *_metrics.json found in --out-dir")
-        meta = dict(bench="Global-PIQA parallel (English)", gpu=gpu, total=n_valid)
+        meta = dict(bench="Global-PIQA parallel (English)", gpu=gpu, total=n_valid, quant=args.quant)
         rpath = os.path.join(args.out_dir, "results.md")
         C.write_results_md(rpath, TITLE, all_metrics, meta, [("By category", "by_category")])
         if args.bucket:
@@ -94,6 +94,7 @@ def main():
         if args.skip_existing and os.path.exists(mpath):
             m = json.load(open(mpath, encoding="utf-8"))
             m["format"] = fmt
+            m["quant"] = args.quant
             print(f"\n=== {name}: reusing cached metrics ({m['overall']['accuracy']:.2f}%) ===")
         else:
             print(f"\n=== Evaluating {name}  (prompt format: {fmt}) ===")
@@ -106,6 +107,7 @@ def main():
             C.evaluate_letters(model, tok, records, args.batch_size, args.max_len)
             m = C.compute_metrics(records, GROUP_KEYS)
             m["format"] = fmt
+            m["quant"] = args.quant
             print(f"  {name}: {m['overall']['accuracy']:.2f}%  "
                   f"({m['overall']['correct']}/{m['overall']['total']}) in {time.time()-t0:.0f}s")
             json.dump(m, open(mpath, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
