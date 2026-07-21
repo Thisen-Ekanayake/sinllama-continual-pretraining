@@ -111,7 +111,8 @@ def main():
             json.dump(m, open(mpath, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
             C.write_predictions_csv(os.path.join(args.out_dir, f"{name}_predictions.csv"),
                                     records, extra_cols=[("category", lambda r: r["category"])])
-            C.free_model(model)
+            del model, tok
+            C.free_model()
 
         all_metrics[name] = m
         C.write_txt(os.path.join(args.out_dir, f"{name}_results.txt"), TITLE, name, m, SECTIONS)

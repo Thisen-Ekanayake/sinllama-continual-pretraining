@@ -452,7 +452,13 @@ def gcs_cp(files, dest):
         print(f"  WARNING: gsutil upload failed -> {dest}: {e}")
 
 
-def free_model(model):
-    del model
+def free_model():
+    """Call after `del model` (and `del tok`) in the CALLER's own scope.
+    `del` only drops a name binding in the frame it executes in — a helper
+    that received `model` as a parameter and did `del model` internally would
+    only drop its own local reference, leaving the caller's variable (and the
+    GPU tensors behind it) alive until the next iteration overwrites it. On a
+    multi-model loop that means the next model's weights get loaded while the
+    previous model is still fully resident in VRAM."""
     gc.collect()
     torch.cuda.empty_cache()
