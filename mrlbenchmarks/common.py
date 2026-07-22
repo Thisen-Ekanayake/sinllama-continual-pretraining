@@ -148,10 +148,13 @@ def to_alpaca(raw_prompt, block_fn):
 # Model loading — bf16 by default (cloud GPU, e.g. 20GB RTX 4000 Ada: an 8B
 # model in bf16 is ~16GB resident, comfortably clear of a quantized load's
 # accuracy trade-off). 4-bit/8-bit (bitsandbytes) remain available via --quant
-# for VRAM-constrained boxes (e.g. an 8GB RTX 4060 laptop). eager attention
-# (not sdpa): verified on the MMLU evals that sdpa mis-handles left-padding
-# masks in batched inference and collapses every prediction to the first
-# option; eager scores correctly, regardless of precision.
+# for VRAM-constrained boxes (e.g. an 8GB RTX 4060 laptop).
+# Attention: sdpa (faster than eager). CAUTION — on the ROCm/MI300X stack the
+# MMLU evals found sdpa mis-handled left-padding masks in batched inference and
+# collapsed every prediction to the first option (eager scored correctly); on
+# NVIDIA/CUDA sdpa handles the masks fine. After switching stacks, sanity-check
+# the first model's pred_label spread in its *_predictions.csv — an all-"A"/
+# all-"1" llama-3-8b run means the mask bug is back: revert to eager there.
 # ----------------------------------------------------------------------------- #
 def load_model(path, quant="bf16"):
     if not torch.cuda.is_available():
@@ -175,7 +178,7 @@ def load_model(path, quant="bf16"):
     tok.padding_side = "left"          # keep answer cue at the sequence end
     tok.truncation_side = "left"       # drop context from the front if over length
 
-    kwargs = dict(device_map={"": 0}, attn_implementation="eager")
+    kwargs = dict(device_map={"": 0}, attn_implementation="sdpa")
     if quant == "bf16":
         kwargs["torch_dtype"] = torch.bfloat16
     elif quant == "4bit":
