@@ -177,9 +177,12 @@ def to_alpaca(raw_prompt, block_fn):
 #     (bitsandbytes) available for VRAM-constrained GPUs.
 #   --device cpu : float32 on CPU (bitsandbytes is GPU-only), for machines with
 #     no GPU — an 8B model is ~32GB in RAM, so it's slow but works.
-# eager attention (not sdpa): verified on the MMLU evals that sdpa mis-handles
-# left-padding masks in batched inference and collapses every prediction to the
-# first option; eager scores correctly, regardless of precision or device.
+# Attention: sdpa (faster than eager). CAUTION — on the ROCm/MI300X stack the
+# MMLU evals found sdpa mis-handled left-padding masks in batched inference and
+# collapsed every prediction to the first option (eager scored correctly); on
+# NVIDIA/CUDA sdpa handles the masks fine. After switching stacks, sanity-check
+# the first model's pred_label spread in its *_predictions.csv — an all-"A"/
+# all-"1" llama-3-8b run means the mask bug is back: revert to eager there.
 # ----------------------------------------------------------------------------- #
 def load_model(path, quant="bf16", device="cuda"):
     if device == "cuda" and not torch.cuda.is_available():
@@ -206,9 +209,9 @@ def load_model(path, quant="bf16", device="cuda"):
 
     if device == "cpu":
         model = AutoModelForCausalLM.from_pretrained(
-            path, torch_dtype=torch.float32, attn_implementation="eager")
+            path, torch_dtype=torch.float32, attn_implementation="sdpa")
     else:
-        kwargs = dict(device_map={"": 0}, attn_implementation="eager")
+        kwargs = dict(device_map={"": 0}, attn_implementation="sdpa")
         if quant == "bf16":
             kwargs["torch_dtype"] = torch.bfloat16
         elif quant == "4bit":
