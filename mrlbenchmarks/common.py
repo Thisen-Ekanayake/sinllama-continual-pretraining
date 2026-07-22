@@ -13,15 +13,9 @@ Bactrian-X instruct model is re-wrapped in the Alpaca template it was SFT'd on.
 Difference from the MMLU scripts: models are loaded in bf16 by default here
 (--quant bf16/4bit/8bit — see load_model()), since this benchmark commonly
 runs on VRAM-constrained boxes as well as full-size cloud GPUs. There is no
-dev/fewshot split for Global-PIQA, so few-shot exemplars are drawn from the
-benchmark itself: pick_fewshot() selects a balanced set (equal count per gold
-answer key) and those rows are EXCLUDED from the test set (never scored).
-
-Loading supports both GPU (--device cuda: bf16 / 4bit / 8bit) and CPU
-(--device cpu: float32) — the latter for running the whole thing on a machine
-with no GPU.
+dev/fewshot split for Global-PIQA, so evaluation is zero-shot.
 """
-import os, re, csv, json, time, gc, random, shutil, subprocess
+import os, re, csv, json, time, gc, shutil, subprocess
 from collections import defaultdict
 
 # Reduce allocator fragmentation overhead across the sequential model loads in
@@ -44,27 +38,6 @@ def clean(s):
     if s is None:
         return ""
     return re.sub(r"\s+", " ", str(s)).strip()
-
-
-def pick_fewshot(golds, per_key, seed=0):
-    """Choose few-shot exemplar row indices with a BALANCED answer-key mix:
-    `per_key` exemplars for each distinct gold label. Selection is deterministic
-    (seeded), and the final order is shuffled so the exemplar answer keys are
-    interleaved (not grouped A,A,B,B,…) — otherwise the model could pick up a
-    positional pattern instead of learning the format. Returns a list of indices;
-    the caller EXCLUDES these from the test set so nothing is scored on a question
-    the model already saw the answer to."""
-    rng = random.Random(seed)
-    by_key = defaultdict(list)
-    for i, g in enumerate(golds):
-        by_key[g].append(i)
-    picked = []
-    for g in sorted(by_key):
-        idxs = by_key[g][:]
-        rng.shuffle(idxs)
-        picked.extend(idxs[:per_key])
-    rng.shuffle(picked)
-    return picked
 
 
 # ----------------------------------------------------------------------------- #
@@ -172,26 +145,21 @@ def to_alpaca(raw_prompt, block_fn):
 
 
 # ----------------------------------------------------------------------------- #
-# Model loading.
-#   --device cuda: bf16 by default (an 8B model is ~16GB resident); 4bit/8bit
-#     (bitsandbytes) available for VRAM-constrained GPUs.
-#   --device cpu : float32 on CPU (bitsandbytes is GPU-only), for machines with
-#     no GPU — an 8B model is ~32GB in RAM, so it's slow but works.
-# Attention: sdpa (faster than eager). CAUTION — on the ROCm/MI300X stack the
-# MMLU evals found sdpa mis-handled left-padding masks in batched inference and
-# collapsed every prediction to the first option (eager scored correctly); on
-# NVIDIA/CUDA sdpa handles the masks fine. After switching stacks, sanity-check
-# the first model's pred_label spread in its *_predictions.csv — an all-"A"/
-# all-"1" llama-3-8b run means the mask bug is back: revert to eager there.
+# Model loading — bf16 by default (cloud GPU, e.g. 20GB RTX 4000 Ada: an 8B
+# model in bf16 is ~16GB resident, comfortably clear of a quantized load's
+# accuracy trade-off). 4-bit/8-bit (bitsandbytes) remain available via --quant
+# for VRAM-constrained boxes (e.g. an 8GB RTX 4060 laptop). eager attention
+# (not sdpa): verified on the MMLU evals that sdpa mis-handles left-padding
+# masks in batched inference and collapses every prediction to the first
+# option; eager scores correctly, regardless of precision.
 # ----------------------------------------------------------------------------- #
-def load_model(path, quant="bf16", device="cuda"):
-    if device == "cuda" and not torch.cuda.is_available():
-        raise SystemExit("--device cuda requested but no CUDA GPU is available; "
-                         "pass --device cpu.")
-    # Squeeze out any cached-but-unused memory from a prior model (same process).
+def load_model(path, quant="bf16"):
+    if not torch.cuda.is_available():
+        raise SystemExit("CUDA GPU required for inference.")
+    # Squeeze out any cached-but-unused memory from a prior model (in the same
+    # process) before loading the next one.
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
     try:
         tok = AutoTokenizer.from_pretrained(path)
     except ValueError as e:
@@ -205,24 +173,21 @@ def load_model(path, quant="bf16", device="cuda"):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"          # keep answer cue at the sequence end
-    tok.truncation_side = "left"       # drop earliest exemplars first if over length
+    tok.truncation_side = "left"       # drop context from the front if over length
 
-    if device == "cpu":
-        model = AutoModelForCausalLM.from_pretrained(
-            path, torch_dtype=torch.float32, attn_implementation="sdpa")
+    kwargs = dict(device_map={"": 0}, attn_implementation="eager")
+    if quant == "bf16":
+        kwargs["torch_dtype"] = torch.bfloat16
+    elif quant == "4bit":
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
+    elif quant == "8bit":
+        kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
     else:
-        kwargs = dict(device_map={"": 0}, attn_implementation="sdpa")
-        if quant == "bf16":
-            kwargs["torch_dtype"] = torch.bfloat16
-        elif quant == "4bit":
-            kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-        elif quant == "8bit":
-            kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-        else:
-            raise ValueError(f"unknown quant mode: {quant}")
-        model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+        raise ValueError(f"unknown quant mode: {quant}")
+
+    model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
     model.eval()
     return model, tok
 
@@ -374,12 +339,7 @@ def write_txt(path, title, name, m, sections):
 
 
 QUANT_LABELS = {"bf16": "bf16", "4bit": "4-bit NF4 (bitsandbytes)",
-                "8bit": "8-bit (bitsandbytes)", "fp32": "float32 (CPU)"}
-
-
-def shot_label(m_or_meta):
-    k = m_or_meta.get("kshot", 0)
-    return f"{k}-shot" if k else "zero-shot"
+                "8bit": "8-bit (bitsandbytes)"}
 
 
 def write_md(path, title, name, m, sections):
@@ -387,7 +347,7 @@ def write_md(path, title, name, m, sections):
     L = [f"# {title} — {name}\n",
          f"**Overall accuracy: {o['accuracy']:.2f}%** "
          f"({o['correct']}/{o['total']}) · {m['skipped']} skipped · "
-         f"{shot_label(m)} · {QUANT_LABELS.get(m.get('quant'), m.get('quant', 'bf16'))} · "
+         f"zero-shot · {QUANT_LABELS.get(m.get('quant'), m.get('quant', 'bf16'))} · "
          f"{m.get('format', 'raw')} prompt\n"]
 
     def section(title_s, table, order=None):
@@ -406,10 +366,8 @@ def write_results_md(path, title, all_metrics, meta, sections):
     """sections: list of (heading, metrics_key) for the combined cross-model report."""
     names = list(all_metrics)
     L = [f"# {title} — Evaluation Results\n"]
-    L.append(f"- Benchmark: **{meta['bench']}** ({meta['total']} evaluated MCQs; "
-             f"{meta.get('n_shots', 0)} balanced exemplars held out as few-shot)")
-    L.append(f"- Setting: **{shot_label(meta)}** (exemplars balanced across answer "
-             f"keys, excluded from test), answer chosen by highest option-token "
+    L.append(f"- Benchmark: **{meta['bench']}** ({meta['total']} evaluated MCQs)")
+    L.append(f"- Setting: **zero-shot**, answer chosen by highest option-token "
              f"probability")
     L.append(f"- Precision: **{QUANT_LABELS.get(meta.get('quant'), meta.get('quant', 'bf16'))}** "
              f"on {meta['gpu']}")
@@ -501,7 +459,6 @@ def free_model():
     only drop its own local reference, leaving the caller's variable (and the
     GPU tensors behind it) alive until the next iteration overwrites it. On a
     multi-model loop that means the next model's weights get loaded while the
-    previous model is still fully resident in VRAM/RAM."""
+    previous model is still fully resident in VRAM."""
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
