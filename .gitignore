@@ -29,5 +29,7 @@ executed/
 *.npy
 *.tex
 *.webp
+*.parquet
+*.log
 
 !requirements.txt
