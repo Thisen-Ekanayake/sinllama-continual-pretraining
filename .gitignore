@@ -10,6 +10,7 @@ OASST2/
 data/
 models/
 executed/
+weights_analysis/new/weights_analysis/
 
 .env
 *.txt
