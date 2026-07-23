@@ -8,7 +8,8 @@ by reading each benchmark's already-written <model>_metrics.json files.
 Run after all 4 evaluate_piqa_*.py scripts have produced their per-model
 metrics (locally, or after downloading them from the pod via run_pod_eval.sh).
 """
-import os, json, argparse
+import os, csv, json, argparse
+from collections import Counter
 from statistics import mean
 
 import common as C
@@ -37,6 +38,48 @@ def load_all(root):
         if models:
             data[out_dir] = models
     return data
+
+
+LABELS = {"1", "2", "3", "4", "A", "B", "C", "D", "?"}
+
+
+def read_label_counts(path):
+    """Recover (pred_counts, gold_counts) from a <model>_predictions.csv.
+
+    Some result CSVs were later pretty-printed with space-padding, which
+    dropped the quoting around comma-containing text fields — so column
+    positions (from either end) are unreliable. Labels are recovered by
+    scanning each row's tail right-to-left: fields -1/-2 are valid/correct
+    (True/False), then the first plausible label token leftward of them is
+    pred_label and the next one further left is gold_label. The caller MUST
+    validate the recovery against metrics.json (correct/total must match).
+    Returns (None, None) if any row can't be parsed."""
+    pred, gold = Counter(), Counter()
+    n_rows = n_correct = 0
+    with open(path, encoding="utf-8") as fh:
+        r = csv.reader(fh)
+        next(r)                                        # header
+        for row in r:
+            if len(row) < 6:
+                continue
+            tail = [x.strip() for x in row]
+            if tail[-1] not in ("True", "False") or tail[-2] not in ("True", "False"):
+                return None, None
+            p = g = None
+            for x in reversed(tail[:-2]):              # rightmost label = pred,
+                if x in LABELS:                        # next one left = gold
+                    if p is None:
+                        p = x
+                    else:
+                        g = x
+                        break
+            if p is None or g is None:
+                return None, None
+            pred[p] += 1
+            gold[g] += 1
+            n_rows += 1
+            n_correct += int(p == g)
+    return dict(pred=pred, n_rows=n_rows, n_correct=n_correct), gold
 
 
 def main():
@@ -103,6 +146,42 @@ def main():
         L.append(C.md_table(["Model", "Accuracy", "Correct", "Total"], sub_rows))
         L.append(f"\nFull detail: `{out_dir}/results.md`, `{out_dir}/<model>_results.txt`, "
                  f"`{out_dir}/<model>_predictions.csv`\n")
+
+    # ---- answer distributions: predicted counts per model + actual (gold) ---- #
+    L.append("\n## Answer distributions (predicted vs actual)\n")
+    L.append("Per benchmark: how many times each model predicted each answer "
+             "option, against the actual (gold) distribution. A model whose "
+             "predictions pile onto one option has collapsed to position bias.\n")
+    for out_dir, label in present:
+        dists, golds = {}, {}
+        for name in sorted(data[out_dir]):
+            path = os.path.join(args.root, out_dir, f"{name}_predictions.csv")
+            if not os.path.exists(path):
+                continue
+            pred_c, gold_c = read_label_counts(path)
+            if pred_c is None:
+                print(f"  WARNING: could not recover labels from {path} — skipped")
+                continue
+            # end-to-end check: recovered labels must reproduce the metrics
+            o = data[out_dir][name]["overall"]
+            if pred_c["n_correct"] != o["correct"] or pred_c["n_rows"] != o["total"]:
+                print(f"  WARNING: {path} label recovery mismatches metrics.json "
+                      f"({pred_c['n_correct']}/{pred_c['n_rows']} vs "
+                      f"{o['correct']}/{o['total']}) — skipped")
+                continue
+            dists[name] = pred_c["pred"]
+            golds[name] = gold_c
+        if not dists:
+            continue
+        gold = golds[next(iter(golds))]
+        if any(g != gold for g in golds.values()):     # should never differ
+            print(f"  WARNING: gold distributions differ across models in {out_dir}")
+        labels = sorted(set(gold) | {k for d in dists.values() for k in d})
+        L.append(f"\n### {label}\n")
+        rows = [[name + " (predicted)"] + [d.get(k, 0) for k in labels]
+                for name, d in dists.items()]
+        rows.append(["**Actual (gold)**"] + [gold.get(k, 0) for k in labels])
+        L.append(C.md_table([""] + labels, rows))
 
     out_path = os.path.join(args.root, args.out)
     open(out_path, "w", encoding="utf-8").write("\n".join(L) + "\n")
