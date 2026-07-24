@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Run all 4 Global-PIQA zero-shot eval scripts on a GPU cloud pod (bf16, sdpa)
+# Run all 4 Global-PIQA few-shot eval scripts on a GPU cloud pod (bf16, sdpa)
 # — Sinhala first (both datasets), then English (both datasets) — then scp each
 # results_* directory back to this local mrlbenchmarks/.
+#
+# Each script holds out KSHOT (default 8) balanced few-shot exemplars and
+# excludes them from the test set. Set KSHOT=0 for a zero-shot run.
 #
 # Connection is parameterized via env vars — set these for YOUR pod first:
 #   POD_HOST   pod IP/hostname                (required)
@@ -10,7 +13,7 @@
 #   POD_KEY    ssh private key                (default ~/.ssh/id_ed25519)
 #   POD_DIR    mrlbenchmarks path on the pod  (default below)
 #   POD_VENV   venv activate path on the pod  (default ../venv/bin/activate)
-# Eval knobs (optional): BATCH_SIZE, MAX_LEN.
+# Eval knobs (optional): BATCH_SIZE, MAX_LEN, KSHOT.
 #
 # Usage:  POD_HOST=1.2.3.4 POD_PORT=22594 bash run_pod_eval.sh
 # ---------------------------------------------------------------------------
@@ -22,9 +25,10 @@ POD_KEY="${POD_KEY:-$HOME/.ssh/id_ed25519}"
 POD_DIR="${POD_DIR:-/root/sinllama-continual-pretraining/mrlbenchmarks}"
 POD_VENV="${POD_VENV:-../venv/bin/activate}"
 
-BATCH_SIZE="${BATCH_SIZE:-8}"
-MAX_LEN="${MAX_LEN:-768}"
-EVAL_ARGS="--quant bf16 --batch-size $BATCH_SIZE --max-len $MAX_LEN"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+MAX_LEN="${MAX_LEN:-2048}"
+KSHOT="${KSHOT:-8}"
+EVAL_ARGS="--quant bf16 --kshot $KSHOT --batch-size $BATCH_SIZE --max-len $MAX_LEN"
 
 # -tt forces a pseudo-terminal on the remote end, so the remote python sees an
 # interactive tty and its tqdm progress bars (model-shard loading, eval loop)
@@ -48,7 +52,7 @@ TOTAL=${#RUNS[@]}
 fmt_secs() { printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
 
 overall_start=$SECONDS
-echo "[$(date '+%F %T')] Running $TOTAL zero-shot eval scripts on $POD_HOST (one at a time, bf16 GPU, sdpa)"
+echo "[$(date '+%F %T')] Running $TOTAL few-shot eval scripts on $POD_HOST (one at a time, bf16 GPU, sdpa)"
 echo "[$(date '+%F %T')] eval args: $EVAL_ARGS"
 
 i=0

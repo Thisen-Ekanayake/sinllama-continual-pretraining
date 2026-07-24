@@ -13,9 +13,12 @@ Bactrian-X instruct model is re-wrapped in the Alpaca template it was SFT'd on.
 Difference from the MMLU scripts: models are loaded in bf16 by default here
 (--quant bf16/4bit/8bit — see load_model()), since this benchmark commonly
 runs on VRAM-constrained boxes as well as full-size cloud GPUs. There is no
-dev/fewshot split for Global-PIQA, so evaluation is zero-shot.
+dev/fewshot split for Global-PIQA, so few-shot exemplars are drawn from the
+benchmark itself: pick_fewshot() selects a balanced set (equal count per gold
+answer key) and those rows are EXCLUDED from the test set (never scored). Each
+eval script defaults to --kshot 8 (few-shot); pass --kshot 0 for a zero-shot run.
 """
-import os, re, csv, json, time, gc, shutil, subprocess
+import os, re, csv, json, time, gc, random, shutil, subprocess
 from collections import defaultdict
 
 # Reduce allocator fragmentation overhead across the sequential model loads in
@@ -38,6 +41,27 @@ def clean(s):
     if s is None:
         return ""
     return re.sub(r"\s+", " ", str(s)).strip()
+
+
+def pick_fewshot(golds, per_key, seed=0):
+    """Choose few-shot exemplar row indices with a BALANCED answer-key mix:
+    `per_key` exemplars for each distinct gold label. Selection is deterministic
+    (seeded), and the final order is shuffled so the exemplar answer keys are
+    interleaved (not grouped A,A,B,B,…) — otherwise the model could pick up a
+    positional pattern instead of learning the format. Returns a list of indices;
+    the caller EXCLUDES these from the test set so nothing is scored on a question
+    the model already saw the answer to."""
+    rng = random.Random(seed)
+    by_key = defaultdict(list)
+    for i, g in enumerate(golds):
+        by_key[g].append(i)
+    picked = []
+    for g in sorted(by_key):
+        idxs = by_key[g][:]
+        rng.shuffle(idxs)
+        picked.extend(idxs[:per_key])
+    rng.shuffle(picked)
+    return picked
 
 
 # ----------------------------------------------------------------------------- #
@@ -74,9 +98,9 @@ TEMPLATE_EN_NONPARALLEL = (
 
 
 def render_si(question, choices, answer=None):
-    """One Sinhala block. answer=None -> block ends in 'පිළිතුර: ' (predict digit);
-    otherwise the block is a rendered few-shot-style exemplar (unused today,
-    since Global-PIQA has no fewshot split, but kept for parity/future use)."""
+    """One Sinhala block. answer=None -> block ends in the answer cue (predict the
+    option digit); otherwise the block is a rendered few-shot exemplar ending in
+    the gold answer digit (used to build the few-shot prefix)."""
     n = len(choices)
     nums = ", ".join(str(i) for i in range(1, n + 1))
     opts = "\n".join(f"{i + 1}. {clean(c)}" for i, c in enumerate(choices))
@@ -123,10 +147,10 @@ ALPACA_PROMPT = (
 
 
 def block_to_alpaca_si(block):
-    before, cue, after = block.rpartition("පිළිතුර:")
-    instr, _, qbody = before.partition("\nප්‍රශ්නය:")
+    before, cue, after = block.rpartition("Answer:")
+    instr, _, qbody = before.partition("\nQuestion:")
     instruction = instr.strip()
-    input_text = ("ප්‍රශ්නය:" + qbody).strip()
+    input_text = ("Question:" + qbody).strip()
     response = cue + after
     return ALPACA_PROMPT.format(instruction, input_text, response)
 
@@ -176,7 +200,7 @@ def load_model(path, quant="bf16"):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"          # keep answer cue at the sequence end
-    tok.truncation_side = "left"       # drop context from the front if over length
+    tok.truncation_side = "left"       # drop earliest few-shot exemplars first if over length
 
     kwargs = dict(device_map={"": 0}, attn_implementation="sdpa")
     if quant == "bf16":
@@ -345,12 +369,17 @@ QUANT_LABELS = {"bf16": "bf16", "4bit": "4-bit NF4 (bitsandbytes)",
                 "8bit": "8-bit (bitsandbytes)"}
 
 
+def shot_label(m_or_meta):
+    k = m_or_meta.get("kshot", 0)
+    return f"{k}-shot" if k else "zero-shot"
+
+
 def write_md(path, title, name, m, sections):
     o = m["overall"]
     L = [f"# {title} — {name}\n",
          f"**Overall accuracy: {o['accuracy']:.2f}%** "
          f"({o['correct']}/{o['total']}) · {m['skipped']} skipped · "
-         f"zero-shot · {QUANT_LABELS.get(m.get('quant'), m.get('quant', 'bf16'))} · "
+         f"{shot_label(m)} · {QUANT_LABELS.get(m.get('quant'), m.get('quant', 'bf16'))} · "
          f"{m.get('format', 'raw')} prompt\n"]
 
     def section(title_s, table, order=None):
@@ -369,8 +398,10 @@ def write_results_md(path, title, all_metrics, meta, sections):
     """sections: list of (heading, metrics_key) for the combined cross-model report."""
     names = list(all_metrics)
     L = [f"# {title} — Evaluation Results\n"]
-    L.append(f"- Benchmark: **{meta['bench']}** ({meta['total']} evaluated MCQs)")
-    L.append(f"- Setting: **zero-shot**, answer chosen by highest option-token "
+    L.append(f"- Benchmark: **{meta['bench']}** ({meta['total']} evaluated MCQs; "
+             f"{meta.get('n_shots', 0)} balanced exemplars held out as few-shot)")
+    L.append(f"- Setting: **{shot_label(meta)}** (exemplars balanced across answer "
+             f"keys, excluded from test), answer chosen by highest option-token "
              f"probability")
     L.append(f"- Precision: **{QUANT_LABELS.get(meta.get('quant'), meta.get('quant', 'bf16'))}** "
              f"on {meta['gpu']}")
