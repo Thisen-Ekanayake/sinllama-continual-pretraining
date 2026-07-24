@@ -67,9 +67,10 @@ def pick_fewshot(golds, per_key, seed=0):
 # ----------------------------------------------------------------------------- #
 # Prompt templates
 # ----------------------------------------------------------------------------- #
-# Sinhala: same structure/markers as mmlu's SinhalaMMLU template (subject-less,
-# since PIQA questions have no clean subject field) so block_to_alpaca_si below
-# (copied from evaluate_sinhala_mmlu.py) keeps working unchanged.
+# Sinhala: same subject-less structure as mmlu's SinhalaMMLU template (PIQA
+# questions have no clean subject field), but the cue markers are English
+# ("Question:"/"Answer:", matching the English templates below); block_to_alpaca_si
+# splits on those same markers.
 TEMPLATE_SI = (
     "Choose the correct or most appropriate answer from these [NUMS] to the following question.\n"
     "Question: [QUESTION]\n"
@@ -135,9 +136,10 @@ def render_en_nonparallel(choices, answer_letter=None):
 
 # ----------------------------------------------------------------------------- #
 # Alpaca-format wrapping (for SinLlama_Bactrianx_Instruct, SFT'd on this
-# template). Both helpers are copied from mmlu/evaluate_{sinhala,english}_mmlu.py
-# unchanged — the split logic only depends on the "ප්‍රශ්නය:"/"පිළිතුර:" and
-# first-line/"Answer:" markers, which every template above still uses.
+# template). Adapted from mmlu/evaluate_{sinhala,english}_mmlu.py — the split
+# logic depends only on the "Question:"/"Answer:" markers (block_to_alpaca_si)
+# and the first-line/"Answer:" markers (block_to_alpaca_en), which every template
+# above uses.
 # ----------------------------------------------------------------------------- #
 ALPACA_PROMPT = (
     "Below is an instruction that describes a task, paired with an input that "
