@@ -47,10 +47,10 @@ def clean(s):
 # since PIQA questions have no clean subject field) so block_to_alpaca_si below
 # (copied from evaluate_sinhala_mmlu.py) keeps working unchanged.
 TEMPLATE_SI = (
-    "පහත ප්‍රශ්නයට [NUMS] යන පිළිතුරු වලින් නිවැරදි හෝ ඉතාමත් ගැළපෙන පිළිතුර තෝරන්න.\n"
-    "ප්‍රශ්නය: [QUESTION]\n"
+    "Choose the correct or most appropriate answer from these [NUMS] to the following question.\n"
+    "Question: [QUESTION]\n"
     "[OPTIONS]\n"
-    "පිළිතුර:"
+    "Answer:"
 )
 
 # English, parallel set (has a real question + N options).
