@@ -72,7 +72,7 @@ torchrun --nnodes 1 --nproc_per_node 1 "${SCRIPT_DIR}/run_clm_sft_mmlu_with_peft
     --save_strategy steps \
     --save_steps 100 \
     --save_total_limit 3 \
-    --evaluation_strategy steps \
+    --eval_strategy steps \
     --eval_steps 100 \
     --load_best_model_at_end True \
     --metric_for_best_model eval_accuracy \
