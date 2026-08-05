@@ -32,5 +32,6 @@ weights_analysis/new/weights_analysis/
 *.webp
 *.parquet
 *.log
+*.aux
 
 !requirements.txt
