@@ -17,18 +17,19 @@ set -uo pipefail          # no -e: one model failing must not kill the rest
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-DATA_ROOT="$PROJECT_DIR/english_mmlu"
+DATA_ROOT="$SCRIPT_DIR/english_mmlu"
 
 # find the Google Cloud SDK if it's installed but not on PATH (enables uploads)
 export PATH="$HOME/google-cloud-sdk/bin:$PATH"
 
 MODELS=(
-  "$PROJECT_DIR/llama-3-8b"
-  "$PROJECT_DIR/SinLlama_v01"
-  "$PROJECT_DIR/SinLlama_cpt_merged"
-  "$PROJECT_DIR/SinLlama_Backtrianx_instruct"
+  "$PROJECT_DIR/models/llama-3-8b"
+  "$PROJECT_DIR/models/SinLlama_v01"
+  "$PROJECT_DIR/models/SinLlama_cpt"
+  "$PROJECT_DIR/models/SinLlama_Bactrianx_Instruct"
+  "$PROJECT_DIR/models/SinLlama_v02"
 )
-ALPACA_MODELS="SinLlama_Backtrianx_instruct"
+ALPACA_MODELS="SinLlama_Bactrianx_Instruct"
 
 # --- format / scoring mode (compose CANONICAL + CALIBRATE) ---
 STYLE_ARGS=()
@@ -43,7 +44,7 @@ if [[ "${CALIBRATE:-0}" == "1" ]]; then
   STYLE_ARGS+=(--calibrate); TAG="${TAG}_cal"
   echo "[$(date '+%F %T')] Contextual calibration: ON"
 fi
-OUT_DIR="$SCRIPT_DIR/results_$TAG"
+OUT_DIR="$PROJECT_DIR/benchmark/EnglishMMLU_results_final"
 BUCKET="gs://sinllama-cpt/mmlu_results_$TAG"
 
 ALPACA_ARG=()
@@ -71,7 +72,7 @@ for MODEL in "${MODELS[@]}"; do
     --models    "$MODEL" \
     "${ALPACA_ARG[@]}" "${STYLE_ARGS[@]}" \
     --kshot 5 --batch-size "$BATCH_SIZE" --max-len "$MAX_LEN" \
-    --out-dir "$OUT_DIR" --bucket "$BUCKET" \
+    --out-dir "$OUT_DIR" --bucket "$BUCKET" --skip-existing \
     > "$OUT_DIR/${name}.log" 2>&1 &
   i=$(( i + 1 ))
   while (( $(jobs -rp | wc -l) >= MAX_PARALLEL )); do wait -n || true; done

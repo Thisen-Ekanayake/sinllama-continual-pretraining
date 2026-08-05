@@ -25,19 +25,20 @@ set -uo pipefail          # NOTE: no -e — one model failing must not kill the 
 # Resolve paths from this script's own location (<repo>/mmlu/run_eval.sh)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-DATA_ROOT="$PROJECT_DIR/SinhalaMMLU"
-OUT_DIR="$SCRIPT_DIR/results"
+DATA_ROOT="$SCRIPT_DIR/SinhalaMMLU"
+OUT_DIR="$PROJECT_DIR/benchmark/SinhalaMMLU_results_final"
 
-# Models to evaluate: base -> cpt -> instruct, plus the original Llama-3 ref.
+# Models to evaluate: base -> cpt -> instruct -> v02, plus the original Llama-3 ref.
 MODELS=(
-  "$PROJECT_DIR/llama-3-8b"
-  "$PROJECT_DIR/SinLlama_v01"
-  "$PROJECT_DIR/SinLlama_cpt_merged"
-  "$PROJECT_DIR/SinLlama_Backtrianx_instruct"
+  "$PROJECT_DIR/models/llama-3-8b"
+  "$PROJECT_DIR/models/SinLlama_v01"
+  "$PROJECT_DIR/models/SinLlama_cpt"
+  "$PROJECT_DIR/models/SinLlama_Bactrianx_Instruct"
+  "$PROJECT_DIR/models/SinLlama_v02"
 )
 
 # Model-name substring(s) scored in the native Alpaca SFT format.
-ALPACA_MODELS="SinLlama_Backtrianx_instruct"
+ALPACA_MODELS="SinLlama_Bactrianx_Instruct"
 
 # GCS bucket (leave empty to skip all uploads). Per-model files land in
 # $BUCKET/<model_name>/ ; the combined results.md lands in $BUCKET/ .
@@ -69,7 +70,7 @@ for MODEL in "${MODELS[@]}"; do
     --models        "$MODEL" \
     --alpaca-models "$ALPACA_MODELS" \
     --kshot 3 --batch-size "$BATCH_SIZE" --max-len "$MAX_LEN" \
-    --out-dir "$OUT_DIR" --bucket "$BUCKET" \
+    --out-dir "$OUT_DIR" --bucket "$BUCKET" --skip-existing \
     > "$OUT_DIR/${name}.log" 2>&1 &
   i=$(( i + 1 ))
   # throttle: wait for a slot to free up before launching the next model
