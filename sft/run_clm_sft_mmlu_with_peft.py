@@ -125,7 +125,12 @@ class ModelArguments:
         metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
     )
     use_fast_tokenizer: bool = field(
-        default=False,
+        # SinLlama_v01 ships only a fast tokenizer (tokenizer.json, no legacy
+        # vocab file). With use_fast=False, AutoTokenizer.from_pretrained on
+        # this transformers version (4.51.3) silently returns `False` instead
+        # of raising, so a bad default here fails downstream with a confusing
+        # 'bool' object has no attribute 'pad_token_id'.
+        default=True,
         metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
     )
     model_revision: str = field(
