@@ -19,7 +19,7 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
 
 # ---- LoRA (same recipe as sft/run_sft.sh: r=64, alpha=128, all 7 projections) ----
-lr=1e-4
+lr=1e-5
 lora_rank=64
 lora_alpha=128
 lora_trainable="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"
@@ -41,7 +41,7 @@ per_device_train_batch_size=16
 per_device_eval_batch_size=16
 gradient_accumulation_steps=4            # effective batch = 64
 max_seq_length=1024                      # covers 99.81% of the cleaned training set
-num_train_epochs=5                       # upper cap; early stopping expected to fire sooner
+num_train_epochs=1                       # upper cap; early stopping expected to fire sooner
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
