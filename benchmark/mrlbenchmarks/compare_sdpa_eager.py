@@ -12,7 +12,7 @@ Writes: results/sdpa_vs_eager.md
 import os, json, argparse
 from statistics import mean
 
-import common as C
+import benchmark.mrlbenchmarks.common as C
 
 BENCHMARKS = [
     ("results_parallel_sinhala", "Parallel (Sinhala)"),

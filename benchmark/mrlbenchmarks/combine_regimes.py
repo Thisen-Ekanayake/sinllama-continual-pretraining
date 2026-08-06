@@ -13,8 +13,8 @@ Writes: results/results_combined.md
 import os, csv, json, argparse
 from statistics import mean
 
-import common as C
-from combine_all_results import read_label_counts
+import benchmark.mrlbenchmarks.common as C
+from benchmark.mrlbenchmarks.combine_all_results import read_label_counts
 
 BENCHMARKS = [
     ("results_parallel_sinhala", "Parallel (Sinhala)"),

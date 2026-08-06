@@ -12,7 +12,7 @@ import os, csv, json, argparse
 from collections import Counter
 from statistics import mean
 
-import common as C
+import benchmark.mrlbenchmarks.common as C
 
 # (out-dir, display name) — Sinhala pair first, then the English pair.
 BENCHMARKS = [

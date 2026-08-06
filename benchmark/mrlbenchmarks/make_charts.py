@@ -22,8 +22,8 @@ from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import seaborn as sns
 
-from combine_all_results import read_label_counts
-from combine_regimes import BENCHMARKS, MODEL_ORDER, load
+from benchmark.mrlbenchmarks.combine_all_results import read_label_counts
+from benchmark.mrlbenchmarks.combine_regimes import BENCHMARKS, MODEL_ORDER, load
 
 # ---- palette (validated categorical slots + chrome, from the dataviz system) - #
 BLUE, ORANGE = "#2a78d6", "#eb6834"          # zero-shot / few-shot series

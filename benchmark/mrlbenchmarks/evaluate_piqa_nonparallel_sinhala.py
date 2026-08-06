@@ -2,23 +2,22 @@
 # -*- coding: utf-8 -*-
 """
 Evaluate llama-3-8b / SinLlama_v01 / SinLlama_cpt / SinLlama_Bactrianx_Instruct
-on the English half of global-piqa-parallel (mrlbenchmarks/global-piqa-parallel)
-— a catastrophic-forgetting check mirroring the Sinhala eval.
+on the Sinhala half of global-piqa-nonparallel (mrlbenchmarks/global-piqa-nonparallel).
 
-Method (see common.py docstring): few-shot (default 8, balanced 2 each of A/B/C/D
-and held out from the test set — pass --kshot 0 for a zero-shot run), 4-way MCQ,
-scored by highest next-token probability among the single-token option letters
-" A".." D" after "Answer:". base/CPT/llama scored raw; the instruct model
-(--alpaca-models) is re-wrapped in the Alpaca template it was SFT'd on. Models
-are loaded in bf16 by default (--quant bf16/4bit/8bit).
+Method (see common.py docstring): few-shot (default 8, balanced 4 each of 1/2 and
+held out from the test set — pass --kshot 0 for a zero-shot run), 2-way MCQ,
+scored by highest next-token probability among digits "1"/"2" after the answer
+cue. base/CPT/llama scored raw; the instruct model (--alpaca-models) is re-wrapped
+in the Alpaca template it was SFT'd on. Models are loaded in bf16 by default
+(--quant bf16/4bit/8bit).
 """
 import os, json, time, argparse
 import pandas as pd
 import torch
 
-import common as C
+import benchmark.mrlbenchmarks.common as C
 
-N_OPTS = 4
+N_OPTS = 2
 
 
 def build_records(rows, kshot, seed):
@@ -27,44 +26,41 @@ def build_records(rows, kshot, seed):
     shot_idx = C.pick_fewshot(golds, per_key, seed=seed) if kshot else []
     shot_set = set(shot_idx)
 
-    def choices_of(row):
-        return [row["eng_solution0"], row["eng_solution1"],
-                row["eng_solution2"], row["eng_solution3"]]
-
     shot_blocks = []
     for i in shot_idx:
         row = rows[i]
-        shot_blocks.append(C.render_en(row["eng_prompt"], choices_of(row),
-                                       answer_letter=C.LETTERS[int(row["label"])]))
+        choices = [row["solution0"], row["solution1"]]
+        shot_blocks.append(C.render_si(row["prompt"], choices, answer=int(row["label"]) + 1))
     prefix = "\n\n".join(shot_blocks)
 
     records = []
     for i, row in enumerate(rows):
         if i in shot_set:
             continue
-        choices = choices_of(row)
+        choices = [row["solution0"], row["solution1"]]
         gold = int(row["label"])
         valid = 0 <= gold < len(choices)
-        test_block = C.render_en(row["eng_prompt"], choices, answer_letter=None)
+        cscore = row.get("approx_cultural_score")
+        test_block = C.render_si(row["prompt"], choices, answer=None)
         prompt = (prefix + "\n\n" + test_block) if prefix else test_block
         records.append(dict(
             idx=i, example_id=row.get("example_id", ""),
-            category=row.get("categories") or "uncategorized",
+            cultural_score=f"score={cscore}",
             n_choices=len(choices), gold=gold, valid=valid,
-            question=C.clean(row["eng_prompt"]), choices=[C.clean(c) for c in choices],
+            question=C.clean(row["prompt"]), choices=[C.clean(c) for c in choices],
             prompt=prompt))
     return records, shot_idx
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="global-piqa-parallel/0.jsonl")
+    ap.add_argument("--data", default="global-piqa-nonparallel/0.jsonl")
     ap.add_argument("--models", nargs="+",
                     default=["../models/llama-3-8b", "../models/SinLlama_v01",
                              "../models/SinLlama_cpt", "../models/SinLlama_Bactrianx_Instruct"])
     ap.add_argument("--alpaca-models", nargs="*", default=["SinLlama_Bactrianx_Instruct"],
                     help="model-name substrings to score in the Alpaca template")
-    ap.add_argument("--out-dir", default="results_parallel_english")
+    ap.add_argument("--out-dir", default="results_nonparallel_sinhala")
     ap.add_argument("--kshot", type=int, default=8, help="# balanced few-shot exemplars, held out (0 = zero-shot)")
     ap.add_argument("--seed", type=int, default=0, help="exemplar selection seed")
     ap.add_argument("--batch-size", type=int, default=4)
@@ -87,12 +83,12 @@ def main():
           f"{len(shot_idx)} exemplars held out: {shot_idx}")
 
     gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
-    GROUP_KEYS = {"by_category": lambda r: r["category"]}
-    SECTIONS = [("Accuracy by category", "by_category", None)]
-    TITLE = "Global-PIQA (parallel) — English"
+    GROUP_KEYS = {"by_cultural_score": lambda r: r["cultural_score"]}
+    SECTIONS = [("Accuracy by cultural-specificity score", "by_cultural_score", None)]
+    TITLE = "Global-PIQA (non-parallel) — Sinhala"
 
     def make_meta():
-        return dict(bench="Global-PIQA parallel (English)", gpu=gpu, total=n_valid,
+        return dict(bench="Global-PIQA non-parallel (Sinhala)", gpu=gpu, total=n_valid,
                     quant=args.quant, kshot=args.kshot, n_shots=len(shot_idx))
 
     if args.combine_only:
@@ -107,7 +103,7 @@ def main():
         if not all_metrics:
             raise SystemExit("combine-only: no *_metrics.json found in --out-dir")
         rpath = os.path.join(args.out_dir, "results.md")
-        C.write_results_md(rpath, TITLE, all_metrics, make_meta(), [("By category", "by_category")])
+        C.write_results_md(rpath, TITLE, all_metrics, make_meta(), [("By cultural score", "by_cultural_score")])
         if args.bucket:
             C.gcs_cp([rpath], args.bucket.rstrip("/") + "/")
         print(f"Wrote combined {rpath}")
@@ -132,8 +128,8 @@ def main():
             records = [dict(r) for r in records0]
             if use_alpaca:
                 for r in records:
-                    r["prompt"] = C.to_alpaca(r["prompt"], C.block_to_alpaca_en)
-            C.evaluate_letters(model, tok, records, args.batch_size, args.max_len)
+                    r["prompt"] = C.to_alpaca(r["prompt"], C.block_to_alpaca_si)
+            C.evaluate_digits(model, tok, records, args.batch_size, args.max_len)
             m = C.compute_metrics(records, GROUP_KEYS)
             m["format"] = fmt
             m["quant"] = args.quant
@@ -143,7 +139,7 @@ def main():
                   f"({m['overall']['correct']}/{m['overall']['total']}) in {time.time()-t0:.0f}s")
             json.dump(m, open(mpath, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
             C.write_predictions_csv(os.path.join(args.out_dir, f"{name}_predictions.csv"),
-                                    records, extra_cols=[("category", lambda r: r["category"])])
+                                    records, extra_cols=[("cultural_score", lambda r: r["cultural_score"])])
             del model, tok
             C.free_model()
 
@@ -154,7 +150,7 @@ def main():
             C.gcs_cp(C.per_model_files(args.out_dir, name), args.bucket.rstrip("/") + f"/{name}/")
 
     rpath = os.path.join(args.out_dir, "results.md")
-    C.write_results_md(rpath, TITLE, all_metrics, make_meta(), [("By category", "by_category")])
+    C.write_results_md(rpath, TITLE, all_metrics, make_meta(), [("By cultural score", "by_cultural_score")])
     if args.bucket and len(args.models) > 1:
         C.gcs_cp([rpath], args.bucket.rstrip("/") + "/")
     print(f"\nWrote results to {args.out_dir}/  (results.md + per-model files)")

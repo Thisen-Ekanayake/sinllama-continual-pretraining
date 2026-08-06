@@ -22,7 +22,7 @@ import os, json, time, argparse
 import pandas as pd
 import torch
 
-import common as C
+import benchmark.mrlbenchmarks.common as C
 
 N_OPTS = 2
 

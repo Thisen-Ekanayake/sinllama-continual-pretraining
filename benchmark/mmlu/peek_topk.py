@@ -27,7 +27,7 @@ Model paths mirror mmlu/run_eval.sh. Run from the mmlu/ directory:
 import argparse, os, gc
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from evaluate_sinhala_mmlu import load_template, build_examples
+from benchmark.mmlu.evaluate_sinhala_mmlu import load_template, build_examples
 
 try:
     from tqdm import tqdm
