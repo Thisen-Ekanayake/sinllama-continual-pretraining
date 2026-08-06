@@ -339,7 +339,7 @@ def main():
         torch_dtype=torch.bfloat16,
         quantization_config=quant_config,
         device_map={"": 0},
-        attn_implementation="sdpa",
+        attn_implementation="eager",
     )
     model.config.use_cache = False
     if args.load_in_4bit:
