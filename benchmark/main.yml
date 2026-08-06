@@ -1,0 +1,47 @@
+# benchmark/main.yml
+# Shared config for every task under benchmark/: which models to score,
+# where each task's dataset lives, where results go, and the GCS bucket
+# to upload them to. All paths are relative to the repo root unless
+# absolute or ~-prefixed. Task-specific hyperparameters live in each
+# task's own config.yml (benchmark/<task>/config.yml).
+
+# Models evaluated by mmlu / hellaswag / piqa, and LoRA-finetuned (one
+# adapter each) by downstream. Each entry must be a ready-to-load model
+# dir (base weights already merged with any prior LoRA/CPT deltas).
+models:
+  - name: llama-3-8b
+    path: models/llama-3-8b
+  - name: SinLlama_v01
+    path: models/SinLlama_v01
+  - name: SinLlama_cpt
+    path: models/SinLlama_cpt
+  - name: SinLlama_Bactrianx_Instruct
+    path: models/SinLlama_Bactrianx_Instruct
+  - name: SinLlama_v02
+    path: models/SinLlama_v02
+
+# Model-name substrings scored/finetuned in the Alpaca
+# "### Instruction / ### Input / ### Response" template instead of the
+# task's raw template.
+alpaca_models:
+  - SinLlama_Bactrianx_Instruct
+
+datasets:
+  mmlu:
+    sinhala: benchmark/mmlu/SinhalaMMLU
+    english: benchmark/mmlu/english_mmlu
+  hellaswag:
+    english: "~/hellaswag"
+    sinhala: "~/HellaSwag/data/translated"
+  piqa:
+    parallel: benchmark/mrlbenchmarks/global-piqa-parallel/0.jsonl
+    nonparallel: benchmark/mrlbenchmarks/global-piqa-nonparallel/0.jsonl
+  downstream:
+    news: data/news
+    sentiment: data/sentiment
+    writing: data/Writing
+
+output_root: benchmark/results
+
+gcs:
+  bucket_root: gs://sinllama-cpt

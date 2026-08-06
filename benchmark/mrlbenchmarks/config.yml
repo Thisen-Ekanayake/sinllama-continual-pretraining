@@ -1,0 +1,16 @@
+# benchmark/mrlbenchmarks/config.yml — Global-PIQA (piqa task). Sub-tasks are
+# sinhala/english; each one runs both the parallel and non-parallel datasets.
+
+kshot: 8
+seed: 0
+batch_size: 4
+max_len: 2048
+quant: bf16
+
+parallel_output_dir: results_parallel
+nonparallel_output_dir: results_nonparallel
+bucket_prefix: piqa
+
+concurrency:
+  num_gpus: 1
+  max_parallel: 2

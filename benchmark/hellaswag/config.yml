@@ -1,0 +1,15 @@
+# benchmark/hellaswag/config.yml — no sub-tasks; English is the
+# catastrophic-forgetting probe (Sinhala is excluded by default: NLLB
+# mangles the adversarial endings, so scores sit near the random floor).
+
+dataset: english   # english | sinhala | both
+kshot: 0
+batch_size: 32
+max_len: 1024
+split: validation
+output_dir: results_hellaswag
+bucket_prefix: hellaswag
+
+concurrency:
+  num_gpus: 1
+  max_parallel: 2

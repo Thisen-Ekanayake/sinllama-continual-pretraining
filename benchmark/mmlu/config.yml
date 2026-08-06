@@ -1,0 +1,25 @@
+# benchmark/mmlu/config.yml — hyperparameters for the mmlu task's two
+# sub-tasks (sinhala, english). Model list, dataset paths, and GCS bucket
+# root live in ../main.yml.
+
+sinhala:
+  kshot: 3
+  batch_size: 32
+  max_len: 4096
+  prompt_file: benchmark/prompts/mmlu_sinhala.txt
+  output_dir: SinhalaMMLU_results_final
+  bucket_prefix: mmlu_results_bf16
+
+english:
+  kshot: 5
+  batch_size: 16
+  max_len: 4096
+  output_dir: EnglishMMLU_results_final
+  bucket_prefix: mmlu_results_english
+  # used instead of bucket_prefix/output_dir when CANONICAL=1 (see run_english.sh)
+  canonical_output_dir: EnglishMMLU_results_canonical
+  canonical_bucket_prefix: mmlu_results_english_canonical
+
+concurrency:
+  num_gpus: 1
+  max_parallel: 2

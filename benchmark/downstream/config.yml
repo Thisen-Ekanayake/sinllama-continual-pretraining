@@ -1,0 +1,84 @@
+# benchmark/downstream/config.yml — LoRA finetune hyperparameters for the
+# 3 downstream sub-tasks (news, sentiment, writing). Each sub-task fine-tunes
+# a fresh LoRA adapter per model in ../main.yml. Dataset dirs live in
+# ../main.yml (datasets.downstream.*).
+
+# /workspace-style network volumes are slow; copy each model once to
+# RAM-backed local_model_dir so repeated loads (one per sub-task) are fast.
+# Set FAST_LOAD=0 in the environment to skip.
+fast_load: true
+local_model_dir: /dev/shm
+load_in_4bit: false
+wandb_project: sinllama-finetune
+
+news:
+  train_file: news_train.csv
+  val_file: news_val.csv
+  test_file: news_test.csv
+  results_file: results_news.txt
+  max_seq_length: 512
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: q_proj,k_proj,v_proj,o_proj,gate_proj,down_proj,up_proj
+  epochs: 1.5
+  lr: 2e-4
+  train_batch_size: 8
+  eval_batch_size: 16
+  grad_accum: 2
+  warmup_ratio: 0.05
+  weight_decay: 0.0
+  logging_steps: 20
+  eval_steps: 50
+  save_steps: 50
+  save_total_limit: 2
+  seed: 42
+  bucket_prefix: downstream_news
+
+sentiment:
+  train_file: sentiment_train.csv
+  val_file: sentiment_val.csv
+  test_file: sentiment_test.csv
+  results_file: results_sentiment.txt
+  max_seq_length: 512
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: q_proj,k_proj,v_proj,o_proj,gate_proj,down_proj,up_proj
+  epochs: 1
+  lr: 2e-4
+  train_batch_size: 8
+  eval_batch_size: 16
+  grad_accum: 2
+  warmup_ratio: 0.05
+  weight_decay: 0.0
+  logging_steps: 20
+  eval_steps: 50
+  save_steps: 50
+  save_total_limit: 2
+  seed: 42
+  bucket_prefix: downstream_sentiment
+
+writing:
+  train_file: writing_style_train.csv
+  val_file: writing_style_val.csv
+  test_file: writing_style_test.csv
+  results_file: results_writing.txt
+  max_seq_length: 512
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: q_proj,k_proj,v_proj,o_proj,gate_proj,down_proj,up_proj
+  epochs: 0.4
+  lr: 2e-4
+  train_batch_size: 8
+  eval_batch_size: 16
+  grad_accum: 2
+  warmup_ratio: 0.05
+  weight_decay: 0.0
+  logging_steps: 20
+  eval_steps: 50
+  save_steps: 50
+  save_total_limit: 2
+  seed: 42
+  bucket_prefix: downstream_writing
