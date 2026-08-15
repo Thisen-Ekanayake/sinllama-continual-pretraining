@@ -98,9 +98,18 @@ train:
   warmup_ratio: 0.03
   weight_decay: 0.0
   max_grad_norm: 1.0
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 4  # effective batch 64 dialogues (~78k tokens/step)
+  # Peak VRAM is set by per_device batch x sequence length, not by the
+  # effective batch. Measured breakdown at seq 2048 (the worst case, which
+  # group_by_length hits on the very first step):
+  #   static (weights bf16 15.1 + LoRA fp32 params/grads/Adam 2.5) = 17.6 GiB
+  #   activations, no checkpointing = 0.170 MiB/token/layer x tokens x 32
+  #   logits + fp32 loss upcast over the 139,336 vocab
+  #   -> B=8: ~130 GiB peak.  B=16: ~243 GiB, i.e. OOM on a 192 GB MI300X.
+  per_device_train_batch_size: 8
+  # Eval holds the largest single tensors (logits for B x 2048 x 139,336, then
+  # upcast to fp32 in the loss), in shapes the training steps never allocate.
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 8  # effective batch 64 dialogues (~78k tokens/step)
   bf16: true
   gradient_checkpointing: false
   group_by_length: true
