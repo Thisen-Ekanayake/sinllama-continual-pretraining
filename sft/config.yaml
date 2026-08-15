@@ -8,10 +8,14 @@
 # Override any single value without editing the file:
 #   python sft/run_sft_uc.py --config sft/config.yaml --set train.learning_rate=5e-5
 #
-# Target hardware: one AMD MI300X (192 GB, ROCm).
+# Target hardware: one AMD MI300X VF (192 GB, ROCm).
 #   * bf16 LoRA, NO bitsandbytes (4/8-bit is unreliable on ROCm, unnecessary at 192 GB).
-#   * sdpa attention (flash-attn-2 left off for ROCm portability).
-#   * no gradient checkpointing (fits comfortably; faster without).
+#   * sdpa attention. Needs torch >= 2.11 / ROCm 7.x: on the older
+#     torch 2.5.1+rocm6.2 venv, sdpa silently ran the O(L^2) MATH kernel
+#     (48 ms vs 7 ms per layer at B=8 S=2048) and the 139,336-wide lm_head GEMM
+#     ran at 53 TFLOPS instead of 607. Measured 7.9 s/step here vs 13.5 there.
+#   * no gradient checkpointing -- but see the peak-memory note below: at B=8
+#     this run sits at ~96% of VRAM, so that is a decision, not free headroom.
 
 model:
   path: models/SinLlama_v02
@@ -99,12 +103,15 @@ train:
   weight_decay: 0.0
   max_grad_norm: 1.0
   # Peak VRAM is set by per_device batch x sequence length, not by the
-  # effective batch. Measured breakdown at seq 2048 (the worst case, which
-  # group_by_length hits on the very first step):
-  #   static (weights bf16 15.1 + LoRA fp32 params/grads/Adam 2.5) = 17.6 GiB
-  #   activations, no checkpointing = 0.170 MiB/token/layer x tokens x 32
-  #   logits + fp32 loss upcast over the 139,336 vocab
-  #   -> B=8: ~130 GiB peak.  B=16: ~243 GiB, i.e. OOM on a 192 GB MI300X.
+  # effective batch. MEASURED at B=8 (skip_memory_metrics: false), worst-case
+  # seq 2048, which group_by_length hits on the very first step:
+  #   before_init_mem_gpu 16.1 GB + alloc_delta 1.4 + peaked_delta 163.0
+  #   = ~176 GiB of the ~183 GiB usable, i.e. 96% -- almost no headroom.
+  # Of that: ~17.6 static (weights 15.1 + LoRA/Adam 2.5), ~31 logits + fp32
+  # loss upcast over the 139,336 vocab, the rest activations
+  # (~0.25 MiB/token/layer x tokens x 32 layers).
+  # Do NOT raise this without first freeing the logits tensor via
+  # use_liger_kernel (worth ~29 GiB), and do not assume B=16 fits: it does not.
   per_device_train_batch_size: 8
   # Eval holds the largest single tensors (logits for B x 2048 x 139,336, then
   # upcast to fp32 in the loss), in shapes the training steps never allocate.
