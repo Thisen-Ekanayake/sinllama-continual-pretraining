@@ -25,6 +25,18 @@ export TOKENIZERS_PARALLELISM=false
 # garbage_collection_threshold makes the allocator release cached blocks once
 # reserved passes 80% of VRAM. Add max_split_size_mb:512 if OOMs persist.
 export PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF:-garbage_collection_threshold:0.8}
+# hipBLASLt beats rocBLAS on MI300X for the shapes this model runs; AMD's
+# workload-tuning guide recommends forcing it rather than leaving it to the
+# heuristic.
+export TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT:-1}
+# TunableOp searches rocBLAS/hipBLASLt candidates per GEMM shape and pins the
+# winner. AMD measures 6-8% on MI300X. The tuning pass makes the FIRST run
+# slower, then results are cached in the csv and reused. Opt in with TUNE=1.
+if [ -n "${TUNE:-}" ]; then
+  export PYTORCH_TUNABLEOP_ENABLED=1
+  export PYTORCH_TUNABLEOP_FILENAME="${PYTORCH_TUNABLEOP_FILENAME:-${SCRIPT_DIR}/runs/tunableop_results.csv}"
+  mkdir -p "$(dirname "${PYTORCH_TUNABLEOP_FILENAME}")"
+fi
 export WANDB_PROJECT="${WANDB_PROJECT:-$("${PYTHON}" - "${CONFIG}" <<'PY'
 import sys, yaml
 print(yaml.safe_load(open(sys.argv[1]))["train"].get("wandb_project", "sinllama-sft-uc"))

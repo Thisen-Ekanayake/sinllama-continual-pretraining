@@ -124,6 +124,16 @@ train:
   # thanks to preprocess_logits_for_metrics, but it does keep an argmax per
   # eval token; set false if eval memory is ever tight.
   compute_token_accuracy: true
+  # Liger's fused Triton kernels. The one that matters at vocab 139,336 is
+  # fused_linear_cross_entropy: it never materializes the B x 2048 x 139,336
+  # logits tensor or its fp32 copy (~25 GiB of the peak at B=8), which is also
+  # what would let per_device_train_batch_size go past 8. Needs
+  # `pip install liger-kernel`; check it works on this ROCm build first with
+  # `python sft/diag_speed.py`.
+  use_liger_kernel: false
+  # false -> Trainer adds train_mem_gpu_peaked_delta to the metrics, which is
+  # how to replace the estimated peak-memory numbers above with measured ones.
+  skip_memory_metrics: true
   report_to: wandb                # "none" to disable
   wandb_project: sinllama-sft-uc
   run_name: sinllama-v02-sft-uc-lora-r64
