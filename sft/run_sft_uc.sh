@@ -18,8 +18,13 @@ CONFIG="${CONFIG:-${SCRIPT_DIR}/config.yaml}"
 PYTHON="${PYTHON:-python3}"
 
 export TOKENIZERS_PARALLELISM=false
-# ROCm allocator: reduce fragmentation OOMs (analogous to PYTORCH_CUDA_ALLOC_CONF).
-export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+# ROCm allocator. NOT expandable_segments: this ROCm build prints
+#   "expandable_segments not supported on this platform"
+# and ignores it, so freed blocks are never coalesced and reserved memory
+# ratchets upward as batch shapes vary (dynamic padding + group_by_length).
+# garbage_collection_threshold makes the allocator release cached blocks once
+# reserved passes 80% of VRAM. Add max_split_size_mb:512 if OOMs persist.
+export PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF:-garbage_collection_threshold:0.8}
 export WANDB_PROJECT="${WANDB_PROJECT:-$("${PYTHON}" - "${CONFIG}" <<'PY'
 import sys, yaml
 print(yaml.safe_load(open(sys.argv[1]))["train"].get("wandb_project", "sinllama-sft-uc"))

@@ -61,6 +61,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 logger = logging.getLogger(__name__)
 
+# Resuming a checkpoint calls torch.load(rng_state.pth, weights_only=True)
+# (transformers/trainer.py:3130). torch >= 2.6 refuses the numpy RNG state
+# inside it, so every resume dies with an UnpicklingError. Allow-list exactly
+# the numpy types HF writes into that file.
+try:
+    import numpy as _np
+    from numpy.core.multiarray import _reconstruct as _np_reconstruct
+
+    _safe = [_np_reconstruct, _np.ndarray, _np.dtype]
+    _safe += [getattr(_np.dtypes, n) for n in ("UInt32DType", "Int64DType", "Float64DType")
+              if hasattr(_np.dtypes, n)]
+    torch.serialization.add_safe_globals(_safe)
+except Exception as _e:  # pragma: no cover - best effort, resume still works without it
+    logger.debug(f"could not allow-list numpy RNG globals: {_e}")
+
 
 # --------------------------------------------------------------------------
 # Arguments
