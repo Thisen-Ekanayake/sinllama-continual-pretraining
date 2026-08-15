@@ -105,13 +105,13 @@ train:
   # Peak VRAM is set by per_device batch x sequence length, not by the
   # effective batch. MEASURED at B=8 (skip_memory_metrics: false), worst-case
   # seq 2048, which group_by_length hits on the very first step:
-  #   before_init_mem_gpu 16.1 GB + alloc_delta 1.4 + peaked_delta 163.0
-  #   = ~176 GiB of the ~183 GiB usable, i.e. 96% -- almost no headroom.
-  # Of that: ~17.6 static (weights 15.1 + LoRA/Adam 2.5), ~31 logits + fp32
-  # loss upcast over the 139,336 vocab, the rest activations
-  # (~0.25 MiB/token/layer x tokens x 32 layers).
-  # Do NOT raise this without first freeing the logits tensor via
-  # use_liger_kernel (worth ~29 GiB), and do not assume B=16 fits: it does not.
+  #   with use_liger_kernel: 16.1 + 1.4 + 116.9 GB = ~131 GiB of ~183 (72%)
+  #   without it:            16.1 + 1.4 + 163.0 GB = ~176 GiB of ~183 (96%)
+  # Of that: ~17.6 static (weights 15.1 + LoRA/Adam 2.5), the rest activations
+  # (~0.25 MiB/token/layer x tokens x 32 layers) plus, when Liger is off, ~46 GB
+  # of logits + fp32 loss upcast over the 139,336 vocab.
+  # B=16 does not fit either way. B=10 would, but the GEMMs already run at ~50%
+  # of this VF's ceiling, so there is little left to win from a bigger batch.
   per_device_train_batch_size: 8
   # Eval holds the largest single tensors (logits for B x 2048 x 139,336, then
   # upcast to fp32 in the loss), in shapes the training steps never allocate.
@@ -133,11 +133,12 @@ train:
   compute_token_accuracy: true
   # Liger's fused Triton kernels. The one that matters at vocab 139,336 is
   # fused_linear_cross_entropy: it never materializes the B x 2048 x 139,336
-  # logits tensor or its fp32 copy (~25 GiB of the peak at B=8), which is also
-  # what would let per_device_train_batch_size go past 8. Needs
-  # `pip install liger-kernel`; check it works on this ROCm build first with
-  # `python sft/diag_speed.py`.
-  use_liger_kernel: false
+  # logits tensor or its fp32 copy. Measured on MI300X: peak 163.0 -> 116.9 GB
+  # (46 GB back), step time unchanged at 7.90 s, train_loss identical to 4
+  # decimals -- a free safety margin, so it is on by default.
+  # Requires `pip install "liger-kernel==0.5.10"` (0.6.0+ hard-requires
+  # transformers >= 4.52, and this pipeline is pinned to 4.51.3).
+  use_liger_kernel: true
   # false -> Trainer adds train_mem_gpu_peaked_delta to the metrics, which is
   # how to replace the estimated peak-memory numbers above with measured ones.
   skip_memory_metrics: true
