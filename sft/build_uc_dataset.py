@@ -303,10 +303,12 @@ def build_uc_dataset(
         desc="dropping dialogues with no supervised token",
     )
 
-    stats = kept.with_format("numpy")
-    n_truncated = int(stats["truncated"].sum())
-    total = int(stats["n_tokens"].sum())
-    supervised = int(stats["n_supervised"].sum())
+    # datasets >= 4 returns a lazy `Column` from ds[name]; 2.x returns a list.
+    # Both iterate, so sum() works on either without materializing an array —
+    # and these are the three int/bool counter columns, never the sequences.
+    n_truncated = sum(1 for t in kept["truncated"] if t)
+    total = sum(kept["n_tokens"])
+    supervised = sum(kept["n_supervised"])
     logger.info(
         f"{stem}: {n_raw} dialogues in file -> {n_tokenized} used -> {len(kept)} kept "
         f"({n_tokenized - len(kept)} had no supervised token); "
