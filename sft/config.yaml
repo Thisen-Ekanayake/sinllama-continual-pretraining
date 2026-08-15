@@ -1,0 +1,126 @@
+# sft/config.yaml
+# Instruction SFT of SinLlama_v02 on UltraChat-Sinhala (the `sft` split only).
+#
+# Read by sft/run_sft_uc.py (training), sft/build_uc_dataset.py (tokenization)
+# and sft/fetch_model.sh (model download). Relative paths resolve against the
+# repo root, not against this file.
+#
+# Override any single value without editing the file:
+#   python sft/run_sft_uc.py --config sft/config.yaml --set train.learning_rate=5e-5
+#
+# Target hardware: one AMD MI300X (192 GB, ROCm).
+#   * bf16 LoRA, NO bitsandbytes (4/8-bit is unreliable on ROCm, unnecessary at 192 GB).
+#   * sdpa attention (flash-attn-2 left off for ROCm portability).
+#   * no gradient checkpointing (fits comfortably; faster without).
+
+model:
+  path: models/SinLlama_v02
+  # Pulled by sft/fetch_model.sh when `path` does not exist locally.
+  gcs_uri: gs://sinllama-cpt/models/SinLlama_v02
+  tokenizer_path: null            # null -> same as model.path
+  torch_dtype: bfloat16
+  attn_implementation: sdpa       # sdpa | eager | flash_attention_2
+  low_cpu_mem_usage: true
+
+data:
+  # UltraChat-Sinhala parquet, schema {prompt, prompt_id, messages:[{role,content}]}.
+  # Full scan of train_sft: 207,831 dialogues, 100% strictly alternating and
+  # user-first, always ending on an assistant turn, no system turns, 4-14 turns.
+  train_file: UltraChat_Sinhala/train_sft.parquet
+  eval_file: UltraChat_Sinhala/test_sft.parquet
+  # test_sft holds 23,106 dialogues; evaluating all of them costs ~15 min per
+  # eval, so early stopping watches a fixed random slice instead.
+  eval_samples: 1500
+  eval_seed: 42
+  # Token budget per dialogue (SinLlama tokenizer, this template):
+  #   2048 -> 90.8% of dialogues kept whole, 96.6% of tokens retained
+  #   3072 -> 99.0% / 99.7%      4096 -> 100% / 100%
+  # Padding is dynamic and batches are length-grouped, so step cost tracks real
+  # token counts, not this cap; raising it mainly raises peak memory.
+  max_seq_length: 2048
+  cache_dir: data/sft_uc_cache    # tokenized datasets, keyed by template+tokenizer+length
+  preprocessing_num_workers: 8
+  max_train_samples: null         # e.g. 2000 for a smoke run
+  max_eval_samples: null
+
+# ---------------------------------------------------------------------------
+# Prompt template.
+#
+# NOT the Llama-3 chat template. In SinLlama the Llama-3 role tokens are dead
+# weights inherited from the base checkpoint: embed_tokens rows 128002-128255
+# (<|start_header_id|>, <|end_header_id|>, <|eot_id|>, every reserved special)
+# have L2 ~1.7e-21 -- zero vectors, mutually indistinguishable on input -- and
+# their lm_head rows are cosine 1.000000 with each other. With frozen
+# embeddings the model could neither read those markers nor ever emit
+# <|eot_id|> over the 253 identical rows next to it, so it would never learn to
+# stop. run_sft_uc.py enforces this with a preflight check.
+#
+# Everything below is therefore built from ordinary CPT-trained tokens, and the
+# terminator is the model's real EOS, <|end_of_text|> (128001), whose lm_head
+# row sits at cosine -0.62 to that dead block.
+#
+# Marker cost is 7 tokens per user+assistant pair. Sinhala labels are also
+# single tokens if you want to A/B them:
+#   user_prefix: "### පරිශීලක:\n"   assistant_prefix: "### සහායක:\n"
+# ---------------------------------------------------------------------------
+template:
+  user_prefix: "### User:\n"
+  assistant_prefix: "### Assistant:\n"
+  turn_separator: "\n\n"
+  eos: "<|end_of_text|>"
+  # Canonical UltraChat SFT injects no system turn. Set a string (e.g. the
+  # Sinhala "ඔබ උපකාරශීලී සහායකයෙකි.") to train a system slot; the emitted
+  # chat_template supports system messages either way.
+  system_prompt: ""
+  system_prefix: "### System:\n"
+  add_bos: true
+
+lora:                             # same recipe as the CPT and MMLU-SFT runs
+  rank: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  # Embeddings and lm_head stay frozen: this template needs no untrained token.
+  # Adding embed_tokens/lm_head here costs +1.14B trainable params and ~2.3 GB
+  # per checkpoint, and lets the preflight accept special-token templates.
+  modules_to_save: []
+  peft_path: null                 # resume from an existing adapter instead of a fresh one
+
+train:
+  output_dir: sft/runs/sft_uc_lora
+  overwrite_output_dir: false     # false -> auto-resume from the last checkpoint
+  # Upper cap only. 207,831 dialogues / effective batch 64 = 3,247 steps per
+  # epoch, ~252M tokens (78.7% of them supervised). Early stopping picks the
+  # real endpoint.
+  num_train_epochs: 3
+  learning_rate: 1.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 4  # effective batch 64 dialogues (~78k tokens/step)
+  bf16: true
+  gradient_checkpointing: false
+  group_by_length: true
+  seed: 42
+  logging_steps: 20
+  eval_steps: 300                 # ~11 evals per epoch, ~32 over the 3-epoch cap
+  save_steps: 300                 # must be a multiple of eval_steps
+  save_total_limit: 3             # the best checkpoint is retained regardless
+  dataloader_num_workers: 4
+  ddp_timeout: 30000
+  # Next-token accuracy over the supervised (assistant) positions only. Cheap
+  # thanks to preprocess_logits_for_metrics, but it does keep an argmax per
+  # eval token; set false if eval memory is ever tight.
+  compute_token_accuracy: true
+  report_to: wandb                # "none" to disable
+  wandb_project: sinllama-sft-uc
+  run_name: sinllama-v02-sft-uc-lora-r64
+
+early_stopping:
+  enabled: true
+  metric: eval_loss               # or eval_token_accuracy (needs compute_token_accuracy)
+  patience: 3                     # 3 x eval_steps = 900 steps (~0.28 epoch) without improvement
+  threshold: 0.0
