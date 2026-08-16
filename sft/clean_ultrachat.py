@@ -43,9 +43,27 @@ INJECTED_WORDS = [
 ]
 
 # Numerals the translator turned into Sinhala sentences ("it is five").
+# Established empirically: every line-initial "<word>යි." token was enumerated
+# and the numerals separated from the genuine words. Counts are line-initial
+# occurrences per 76,154 turns.
+#
+# Note which numerals are NOT here. 1/2/3/4/7/9 (එකයි, දෙකයි, තුනයි, හතරයි,
+# හතයි, නවයයි) survive the translation intact -- each occurs under 80 times and
+# roughly as often mid-sentence as line-initially, i.e. they are ordinary prose,
+# not mangled markers. And the same enumeration turned up ස්තුතියි ("thanks"),
+# හේයි ("hey"), නියමයි ("great"), එකඟයි ("agree"), ඉවරයි ("finished") in the
+# same position -- which is why this is an explicit whitelist and not a
+# "<word>යි." pattern.
 WORD_NUMERALS = {
-    "පහයි": "5",
-    "හයයි": "6",
+    "පහයි": "5",        # 8,405
+    "හයයි": "6",        # 4,347
+    "අටයි": "8",        # 1,908
+    "දහයයි": "10",      # 1,115
+    "එකොළහයි": "11",    #   338
+    "දොළහයි": "12",     #   263
+    "විස්සයි": "20",    #    62
+    "විසිපහයි": "25",   #    24
+    "පනහයි": "50",      #     5
 }
 
 ORDERING = """\
@@ -80,12 +98,19 @@ def _build_rules() -> list[tuple[str, re.Pattern, str, str]]:
             re.compile(rf"(?m)^(\s*){word}\.(\s)"),
             rf"\g<1>{digit}.\g<2>",
             f'list number {digit} was translated as the sentence "{word}." '
-            f"-- anchored to line start so genuine mid-sentence prose is untouched",
+            f"-- anchored to line start, which is load-bearing: these are real "
+            f"Sinhala predicates and thousands of mid-sentence uses are genuine",
         ))
 
     rules.append((
         "injected_list_word",
-        re.compile(rf"(?m)^(\s*\d+\.\s+)(?:{'|'.join(map(re.escape, INJECTED_WORDS))})\s+"),
+        # Anchored to "preceded by whitespace" rather than to line start: 15.5%
+        # of injections sit in run-on lists rendered on one line
+        # ("... යන්න. 2. සෞඛ්‍යය ... 3. මෘදු ..."), which a ^ anchor misses.
+        # Verified a strict superset of the line-anchored form (0 matches lost,
+        # +10,121 gained per 76k turns) and every inspected inline match was a
+        # genuine list item.
+        re.compile(rf"(?<![^\s])(\d+\.\s+)(?:{'|'.join(map(re.escape, INJECTED_WORDS))})\s+"),
         r"\1",
         "a junk word is wedged between the list marker and the content in "
         "99.2% of numbered list items",
@@ -128,14 +153,26 @@ TIDY = [
 ]
 
 
-def clean_text(text: str, hits: Counter | None = None) -> str:
-    """Apply every rule in order. Counts substitutions into `hits` if given."""
+def clean_text(text: str, hits: Counter | None = None, max_passes: int = 4) -> str:
+    """Apply every rule in order, to a fixpoint. Counts into `hits` if given.
+
+    The loop is not decorative. `re.sub` resumes scanning after each match
+    rather than rescanning, so a doubled injection -- "1. සෞඛ්‍යය මෘදු foo" --
+    only loses its first junk word per pass. Iterating to a fixpoint catches the
+    rest; measured at 9 turns per 3,124 needing a second pass.
+    """
     if not text:
         return text
-    for name, pat, repl, _why in RULES:
-        text, n = pat.subn(repl, text)
-        if n and hits is not None:
-            hits[name] += n
+    for _ in range(max_passes):
+        changed = False
+        for name, pat, repl, _why in RULES:
+            text, n = pat.subn(repl, text)
+            if n:
+                changed = True
+                if hits is not None:
+                    hits[name] += n
+        if not changed:
+            break
     for name, pat, repl in TIDY:
         text, n = pat.subn(repl, text)
         if n and hits is not None:
@@ -244,8 +281,11 @@ def report(src: Path, dst: Path, stats: dict, dry_run: bool):
 
 def residual_check(path: Path, limit_batches: int = 4):
     """Re-scan a cleaned file for artifacts that should now be gone."""
-    item = re.compile(r"(?m)^\s*\d+\.\s+")
-    inj = re.compile("|".join(map(re.escape, INJECTED_WORDS)))
+    item = re.compile(r"(?<![^\s])\d+\.\s+")
+    # The trailing \s+ is required: without it this matches සෞඛ්‍යය as a prefix
+    # of legitimate inflections such as සෞඛ්‍යයට ("to health") and reports
+    # phantom residue the cleaner correctly left alone.
+    inj = re.compile("(?:" + "|".join(map(re.escape, INJECTED_WORDS)) + r")\s")
     wordnum = re.compile(r"(?m)^\s*(?:" + "|".join(WORD_NUMERALS) + r")\.")
     caption = re.compile(r"\[\s*\d+\s*වන\s*පිටුවේ")
     n_items = n_bad = n_wordnum = n_caption = 0
