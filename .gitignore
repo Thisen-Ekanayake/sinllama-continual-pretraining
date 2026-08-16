@@ -36,3 +36,5 @@ weights_analysis/new/weights_analysis/
 *.html
 
 !requirements.txt
+# docs/ is prose we actually want tracked, despite the blanket *.md above.
+!docs/*.md
