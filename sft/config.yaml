@@ -30,10 +30,15 @@ data:
   # UltraChat-Sinhala parquet, schema {prompt, prompt_id, messages:[{role,content}]}.
   # Full scan of train_sft: 207,831 dialogues, 100% strictly alternating and
   # user-first, always ending on an assistant turn, no system turns, 4-14 turns.
-  train_file: UltraChat_Sinhala/train_sft.parquet
-  eval_file: UltraChat_Sinhala/test_sft.parquet
-  # test_sft holds 23,106 dialogues; evaluating all of them costs ~15 min per
-  # eval, so early stopping watches a fixed random slice instead.
+  # Cleaned by sft/clean_ultrachat.py -- the raw parquet carries JW300 MT
+  # artifacts in 36% of turns (junk word after 99.2% of list markers, "[edit]"
+  # links, "[Picture on page N]"), and the first run reproduced all of them
+  # verbatim. See docs/ultrachat-cleaning.md. Cleaning costs 0.89% of dialogues:
+  # 207,831 -> 205,973 train, 23,106 -> 22,917 eval.
+  train_file: UltraChat_Sinhala/train_sft_clean.parquet
+  eval_file: UltraChat_Sinhala/test_sft_clean.parquet
+  # Evaluating all 22,917 eval dialogues costs ~15 min per eval, so early
+  # stopping watches a fixed random slice instead.
   eval_samples: 1500
   eval_seed: 42
   # Token budget per dialogue (SinLlama tokenizer, this template):
@@ -91,11 +96,11 @@ lora:                             # same recipe as the CPT and MMLU-SFT runs
   peft_path: null                 # resume from an existing adapter instead of a fresh one
 
 train:
-  output_dir: sft/runs/sft_uc_lora
+  output_dir: sft/runs/sft_uc_lora_clean
   overwrite_output_dir: false     # false -> auto-resume from the last checkpoint
-  # Upper cap only. 207,831 dialogues / effective batch 64 = 3,247 steps per
-  # epoch, ~252M tokens (78.7% of them supervised). Early stopping picks the
-  # real endpoint.
+  # Upper cap only. 205,973 dialogues / effective batch 64 = 3,219 steps per
+  # epoch, ~250M tokens (78.7% of them supervised). Early stopping picks the
+  # real endpoint -- the first (uncleaned) run stopped at step 7,200, epoch 2.22.
   num_train_epochs: 3
   learning_rate: 1.0e-4
   lr_scheduler_type: cosine
