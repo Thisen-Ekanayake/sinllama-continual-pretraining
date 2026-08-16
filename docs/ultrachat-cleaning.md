@@ -39,17 +39,59 @@ Run `python sft/clean_ultrachat.py --rules` to print these from the source.
 
 | # | rule | what it fixes | scale |
 |---|---|---|---|
-| 1 | `word_numeral_5` / `word_numeral_6` | `පහයי.` / `හයයි.` at line start → `5.` / `6.` — the translator rendered the numerals as the sentences "it is five" / "it is six" | 221,440 |
-| 2 | `injected_list_word` | a junk word wedged between a list marker and its content: `සෞඛ්‍යය` (health), `මෘදු` (soft), `සීමාව`, `සයිටම්`, `මයික්`, `මිනීමැරුම්` | 964,134 |
+| 1 | `word_numeral_*` | list numbers rendered as Sinhala sentences ("it is five") for **nine** numerals: 5, 6, 8, 10, 11, 12, 20, 25, 50 | 282,367 |
+| 2 | `injected_list_word` | a junk word wedged between a list marker and its content: `සෞඛ්‍යය` (health), `මෘදු` (soft), `සීමාව`, `සයිටම්`, `මයික්`, `මිනීමැරුම්` | 1,143,839 |
 | 3 | `jw300_caption` | `[Nවන පිටුවේ පින්තූරය]` — "[Picture on page N]" | 537,535 |
 | 4 | `mediawiki_edit_link` | `[සංස්කරණය]` — "[edit]", a MediaWiki section-edit link dropped into recipes, travel guides and fiction | 127,156 |
-| 5 | `tidy_*` | doubled spaces, space-before-punctuation, 3+ blank lines, trailing whitespace left behind by 1–4 | 641,624 |
+| 5 | `tidy_*` | doubled spaces, space-before-punctuation, 3+ blank lines, trailing whitespace left behind by 1–4 | 641,237 |
 
-Counts are substitutions over the full `train_sft.parquet`.
+Counts are substitutions over the full `train_sft.parquet` — **2.09 million**
+artifact removals in all.
 
 **Corpus cost: 0.89%.** 207,831 dialogues in, **205,973 kept**, 1,858 dropped and
-2,297 truncated; 477,099 of 1,315,386 turns modified (36.3%). `test_sft` behaves
-identically: 23,106 → 22,917 kept (0.82% cost), 36.0% of turns modified.
+2,297 truncated; 478,269 of 1,315,386 turns modified (36.4%). `test_sft` behaves
+identically: 23,106 → 22,917 kept (0.82% cost), 36.1% of turns modified.
+
+Three details in rules 1 and 2 are load-bearing, and each was established by
+measurement rather than guessed:
+
+- **The numeral set is nine, not two.** Enumerating every line-initial
+  "<word>yi." token showed 5, 6, 8, 10, 11, 12, 20, 25 and 50 are all mangled,
+  while 1/2/3/4/7/9 survive translation intact. The same enumeration turned up
+  the ordinary words for "thanks", "hey" and "great" in that position, which is
+  why the rule uses an explicit numeral whitelist and not a suffix pattern.
+- **Numerals stay anchored to line start; injected words do not.** The word for
+  "it is five" occurs 3,935 times mid-sentence as genuine prose, so widening its
+  anchor would be destructive. The injected-word rule is the opposite case:
+  15.5% of injections sit in run-on lists rendered on one line, so it anchors to
+  "preceded by whitespace" instead — verified a strict superset of the
+  line-anchored form, 0 matches lost, +10,121 gained per 76k turns.
+- **Rules iterate to a fixpoint.** `re.sub` resumes after each match rather than
+  rescanning, so a doubled injection loses only its first junk word per pass.
+
+### Measured false-positive rate
+
+The junk words are also ordinary Sinhala words that can genuinely begin a list
+item — "1. <soft> cushioning" is real content, and the rule does strip it.
+Comparing each word's rate at list-item start against its rate at non-list
+sentence start bounds the damage:
+
+| word | starts a list item | genuinely sentence-initial elsewhere | est. false positives |
+|---|---|---|---|
+| "health" | 59.27% | 0.0150% | ~10 of 39,019 — **0.03%** |
+| "soft" | 25.74% | 0.0345% | ~23 of 16,946 — **0.13%** |
+| "limit" | 8.60% | 0.0021% | ~1 of 5,661 — **0.02%** |
+| "Mike" | 0.88% | 0.0176% | ~12 of 578 — **2.0%** |
+
+Under 0.2% overall, against 99.2% of list items corrupted if the rule is not
+applied. "Mike" is the weakest of the six because it is a name, but at 578
+occurrences it is a rounding error either way.
+
+**The word list is complete.** After cleaning, the first word following a list
+marker is distributed like ordinary prose — the most common is the word for
+"your" at 2.97%, with a long flat tail. Before cleaning the top word was
+"health" at 59.27%. There is no seventh injected word, and the residual scan
+reports **0.00%** of list items still carrying one.
 
 **Ordering is load-bearing.** Word-numerals must run first: a line reading
 `පහයි. සෞඛ්‍යය foo` only matches rule 2's `^\d+\.` anchor once rule 1 has
@@ -123,12 +165,18 @@ So the rule set here is *not* the full audit's output. It is:
   intact, and both leave the `රූප සටහන` and `[]` false friends untouched;
 - plus the null results above, which cost nothing to honour.
 
-Findings from the four lenses that never completed — numbered-list variants
-beyond the six known junk words, bullet-list injection, code-fence damage,
-repetition loops — remain **unaudited**. The residual scan reports ~0.3% of
-numbered list items still carrying an unrecognised junk word, which is roughly
-where a completed numbered-lists lens would have paid off. Re-running the audit
-is the obvious next improvement.
+Findings from the four lenses that never completed — bullet-list injection,
+code-fence damage, and repetition loops — remain **unaudited**.
+
+The one gap that mattered most, the numbered-lists lens, was closed by hand
+afterwards rather than left open, because the first cleaned run visibly still
+had artifacts in it. That work produced the nine-numeral set, the widened
+inline anchor, the fixpoint loop and the false-positive table in section 2, and
+it ended with a positive completeness check: the post-clean distribution of the
+first word after a list marker is flat and ordinary, so there is no seventh
+injected word to find. Residual junk in the cleaned corpus is 0.00%.
+
+Re-running the full audit for the remaining three lenses is still worth doing.
 
 ## 6. Running it
 
