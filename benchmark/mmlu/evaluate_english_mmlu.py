@@ -228,17 +228,22 @@ def build_examples(data_root, k, limit=0, canonical=False):
         if canonical:
             blocks = [render_canonical(s.question, [clean(c) for c in list(s.choices)],
                                        LETTERS[int(s.answer)]) for s in shots]
+            shot_prefix = CANON_HEADER.format(pretty) + "\n\n".join(blocks)
             blocks.append(render_canonical(row.question, choices, None))
             prompt = CANON_HEADER.format(pretty) + "\n\n".join(blocks)
         else:
             blocks = [render(pretty, s.question, [clean(c) for c in list(s.choices)],
                              LETTERS[int(s.answer)]) for s in shots]
+            shot_prefix = "\n\n".join(blocks)
             blocks.append(render(pretty, row.question, choices, None))
             prompt = "\n\n".join(blocks)
         records.append(dict(
             subject=subj, subject_pretty=pretty, domain=subject_to_domain(subj),
             n_choices=n, gold=gold, gold_letter=LETTERS[gold] if valid else "?",
-            valid=valid, prompt=prompt))
+            valid=valid, prompt=prompt,
+            # retained so the permutation arm can re-render with rotated options
+            shot_prefix=shot_prefix, question=row.question, choices=choices,
+            canonical=canonical))
     return records
 
 
