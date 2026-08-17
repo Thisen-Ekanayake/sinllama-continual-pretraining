@@ -19,6 +19,16 @@ models:
     path: models/SinLlama_Bactrianx_Instruct
   - name: SinLlama_v02
     path: models/SinLlama_v02
+  # UltraChat-Sinhala chat SFT on top of v02. Scored RAW, not via their chat
+  # template, so the numbers are directly comparable to SinLlama_v02 above --
+  # a `chat_models` path analogous to alpaca_models does not exist yet.
+  # _cleaned is the same recipe retrained on the de-artifacted corpus; keeping
+  # both makes the dirty-vs-clean delta measurable. See
+  # docs/uc-instruct-evaluation.md and docs/ultrachat-cleaning.md.
+  - name: SinLlama_uc_instruct
+    path: models/SinLlama_uc_instruct
+  - name: SinLlama_uc_instruct_cleaned
+    path: models/SinLlama_uc_instruct_cleaned
 
 # Model-name substrings scored/finetuned in the Alpaca
 # "### Instruction / ### Input / ### Response" template instead of the
