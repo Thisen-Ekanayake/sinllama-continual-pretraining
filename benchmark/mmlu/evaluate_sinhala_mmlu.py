@@ -209,6 +209,7 @@ def build_examples(data_root, template, k):
             # pre-render the shared few-shot prefix for this file
             shot_blocks = [render(template, subject_original(s), s["question"],
                                   s["choices"], s["answer"]) for s in shots]
+            shot_prefix = "\n\n".join(shot_blocks)
             data = json.load(open(f, encoding="utf-8"))
             for it in data:
                 choices = it.get("choices") or []
@@ -223,7 +224,11 @@ def build_examples(data_root, template, k):
                     category=norm_cat(it.get("category")),
                     subject_key=skey, subject_display=sdisp,
                     subject_original=subject_original(it),
-                    n_choices=n, gold=gold, valid=valid, prompt=prompt))
+                    n_choices=n, gold=gold, valid=valid, prompt=prompt,
+                    # retained for the de-biasing arms (calibration needs the
+                    # exact few-shot prefix; permutation re-renders the options)
+                    shot_prefix=shot_prefix, question=it["question"],
+                    choices=choices))
     # one canonical display label per subject_key (merges case-only variants
     # such as "Buddhism"/"buddhism", "Geography"/"geography")
     disp_by_key = {}
@@ -238,6 +243,73 @@ def build_examples(data_root, template, k):
     for r in records:
         r["subject_label"] = disp_by_key[r["subject_key"]]
     return records, missing_fewshot
+
+
+# ----------------------------------------------------------------------------- #
+# Content-free prompts for contextual calibration (Zhao et al. 2021).
+#
+# The model is shown the same few-shot prefix and an otherwise-identical test
+# block whose question and every option are the placeholder "N/A". Whatever
+# probability mass it still puts on the answer digits is pure positional prior:
+# there is no content to reason about. Subtracting that prior (in log space)
+# before argmax removes the option-position bias.
+#
+# Unlike English MMLU, SinhalaMMLU is not uniformly 4-way (4353 items are 4-way,
+# 2523 are 5-way, 2 are 6-way), so the prior is estimated per option-count as
+# well as per subject: a 5-way prompt has a different positional prior than a
+# 4-way one. The key is (difficulty, subject_key, n_choices) because the
+# few-shot prefix itself varies by difficulty and subject.
+# ----------------------------------------------------------------------------- #
+CF_QUESTION = "N/A"
+
+
+def cf_key(r):
+    return (r["difficulty"], r["subject_key"], r["n_choices"])
+
+
+def build_cf_prompts(template, records):
+    """One content-free prompt per (difficulty, subject_key, n_choices) combo.
+
+    Reuses each record's stored `shot_prefix` verbatim, so the calibration
+    prompt is byte-identical to the real prompt up to the test block -- no
+    risk of drifting from build_examples()'s few-shot selection or its fuzzy
+    subject fallback."""
+    cf = {}
+    for r in records:
+        if not r.get("valid"):
+            continue
+        k = cf_key(r)
+        if k in cf:
+            continue
+        n = r["n_choices"]
+        block = render(template, r["subject_original"], CF_QUESTION,
+                       [CF_QUESTION] * n, answer=None)
+        cf[k] = (r["shot_prefix"] + "\n\n" + block) if r["shot_prefix"] else block
+    return cf
+
+
+@torch.no_grad()
+def compute_cf_bias(model, tok, cf_prompts, digit_id, max_len, batch_size=8):
+    """(difficulty, subject, n_choices) -> tensor of prior logits over the
+    answer digits, to be subtracted from each real question's digit logits."""
+    items = list(cf_prompts.items())
+    bias = {}
+    for i in tqdm(range(0, len(items), batch_size), desc="  cf-bias"):
+        chunk = items[i:i + batch_size]
+        enc = tok([p for _, p in chunk], return_tensors="pt", padding=True,
+                  truncation=True, max_length=max_len).to(model.device)
+        try:
+            out = model(**enc, logits_to_keep=1)
+        except TypeError:
+            out = model(**enc)
+        logits = out.logits[:, -1, :].float().cpu()
+        for j, (key, _) in enumerate(chunk):
+            n = key[2]
+            cand = [digit_id[d] for d in range(1, n + 1)]
+            # log-softmax over just the candidate digits: the prior is a
+            # distribution over the options, not raw unnormalised logits
+            bias[key] = torch.log_softmax(logits[j, cand], dim=-1)
+    return bias
 
 
 def load_model(path):
@@ -258,10 +330,13 @@ def load_model(path):
 
 
 @torch.no_grad()
-def _score_batch(model, tok, batch, digit_id, max_len):
+def _score_batch(model, tok, batch, digit_id, max_len, cf_bias=None):
     """Score one batch. On CUDA OOM, free memory and recursively split the
     batch (and finally shrink max_len) until it fits — base Llama-3 byte-falls
-    back on Sinhala, so some batches are very long."""
+    back on Sinhala, so some batches are very long.
+
+    If cf_bias is given, subtract the content-free positional prior before
+    argmax (contextual calibration)."""
     enc = out = None
     try:
         enc = tok([r["prompt"] for r in batch], return_tensors="pt",
@@ -274,7 +349,10 @@ def _score_batch(model, tok, batch, digit_id, max_len):
         logits = out.logits[:, -1, :].float().cpu()     # next-token logits
         for j, r in enumerate(batch):
             cand = [digit_id[d] for d in range(1, r["n_choices"] + 1)]
-            r["pred"] = int(torch.argmax(logits[j, cand]).item()) + 1  # 1-indexed
+            scores = torch.log_softmax(logits[j, cand], dim=-1)
+            if cf_bias is not None:                     # contextual calibration
+                scores = scores - cf_bias[cf_key(r)]
+            r["pred"] = int(torch.argmax(scores).item()) + 1  # 1-indexed
             r["correct"] = (r["pred"] == r["gold"])
     except torch.cuda.OutOfMemoryError:
         enc = out = None                                # drop refs, then reclaim
@@ -284,20 +362,38 @@ def _score_batch(model, tok, batch, digit_id, max_len):
                 batch[0]["pred"] = -1
                 batch[0]["correct"] = False
             else:
-                _score_batch(model, tok, batch, digit_id, 768)
+                _score_batch(model, tok, batch, digit_id, 768, cf_bias)
         else:
             mid = len(batch) // 2
-            _score_batch(model, tok, batch[:mid], digit_id, max_len)
-            _score_batch(model, tok, batch[mid:], digit_id, max_len)
+            _score_batch(model, tok, batch[:mid], digit_id, max_len, cf_bias)
+            _score_batch(model, tok, batch[mid:], digit_id, max_len, cf_bias)
+
+
+def _digit_ids(tok):
+    """Single-token id for each answer digit (1.."9"). render() already emits the
+    space before the digit, so these are the bare digit tokens.
+
+    Guarded: this takes the FIRST token of each digit's encoding, which is only
+    correct when digits are single tokens (true for the Llama-3 BPE that SinLlama
+    uses). A SentencePiece tokenizer instead emits a shared leading-space token
+    first, so every digit would collapse to the same id and every score would be
+    identical -- silently producing meaningless accuracy rather than an error."""
+    ids = {d: tok.encode(str(d), add_special_tokens=False)[0] for d in range(1, 10)}
+    if len(set(ids.values())) != len(ids):
+        raise SystemExit(
+            "FATAL: answer digits do not map to distinct single tokens with this "
+            f"tokenizer (got {ids}). Digit-probability scoring is invalid here; "
+            "this eval assumes a Llama-3-style BPE where '1'..'9' are single "
+            "tokens.")
+    return ids
 
 
 @torch.no_grad()
-def evaluate(model, tok, records, batch_size, max_len):
-    # single-token id for each answer digit (1.."9")
-    digit_id = {d: tok.encode(str(d), add_special_tokens=False)[0] for d in range(1, 10)}
+def evaluate(model, tok, records, batch_size, max_len, cf_bias=None):
+    digit_id = _digit_ids(tok)
     todo = [r for r in records if r["valid"]]
     for i in tqdm(range(0, len(todo), batch_size), desc="  eval"):
-        _score_batch(model, tok, todo[i:i + batch_size], digit_id, max_len)
+        _score_batch(model, tok, todo[i:i + batch_size], digit_id, max_len, cf_bias)
     return records
 
 
@@ -503,6 +599,11 @@ def main():
     ap.add_argument("--bucket", default="",
                     help="GCS bucket/prefix; each model's files are uploaded to "
                          "<bucket>/<model_name>/ as soon as it finishes")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="contextual calibration: subtract each model's "
+                         "positional prior, estimated from a content-free "
+                         "(all-'N/A') prompt, before argmax. Estimated per "
+                         "(difficulty, subject, n_choices).")
     ap.add_argument("--combine-only", action="store_true",
                     help="skip evaluation: just rebuild (and upload) the combined "
                          "results.md from existing <model>_metrics.json files")
@@ -571,9 +672,26 @@ def main():
             elif use_chat:                             # ... or the chat template
                 for r in records:
                     r["prompt"] = to_chat(r["prompt"])
-            evaluate(model, tok, records, args.batch_size, args.max_len)
+
+            cf_bias = None
+            if args.calibrate:
+                # the content-free prompt must go through the SAME format
+                # wrapper as the real prompts, or the prior is measured in a
+                # context the model never sees at scoring time
+                cfp = build_cf_prompts(template, records)
+                if use_alpaca:
+                    cfp = {k: to_alpaca(v) for k, v in cfp.items()}
+                elif use_chat:
+                    cfp = {k: to_chat(v) for k, v in cfp.items()}
+                print(f"  estimating positional prior from {len(cfp)} "
+                      f"content-free prompts")
+                cf_bias = compute_cf_bias(model, tok, cfp, _digit_ids(tok),
+                                          args.max_len)
+
+            evaluate(model, tok, records, args.batch_size, args.max_len, cf_bias)
             m = compute_metrics(records)
             m["format"] = fmt                          # persist into metrics.json
+            m["calibrated"] = bool(args.calibrate)
             print(f"  {name}: {m['overall']['accuracy']:.2f}%  "
                   f"({m['overall']['correct']}/{m['overall']['total']}) "
                   f"in {time.time()-t0:.0f}s")
