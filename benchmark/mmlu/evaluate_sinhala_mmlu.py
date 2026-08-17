@@ -245,6 +245,27 @@ def build_examples(data_root, template, k):
     return records, missing_fewshot
 
 
+def assert_eager(model, path):
+    """Fail loudly if the SDPA kernel is in effect.
+
+    `attn_implementation="eager"` is a request, not a guarantee -- it can be
+    overridden by a config, ignored by some transformers versions, or silently
+    fall back. On this ROCm stack SDPA mis-handles left-padding masks in batched
+    inference and collapses predictions onto one option, which does NOT raise:
+    it just returns a plausible-looking wrong number. That is not hypothetical
+    here -- SinLlama_cpt was published at 40.13% English / 35.65% Sinhala from an
+    affected run and re-scored at 47.27% / 41.33% once eager was forced, a 6-7pp
+    error whose only visible symptom was a near-absent option "B" (543/14042
+    predictions against a 24.7% gold rate). Check it rather than trust it."""
+    impl = getattr(model.config, "_attn_implementation", None)
+    if impl != "eager":
+        raise SystemExit(
+            f"FATAL: {path} loaded with attn_implementation={impl!r}, not "
+            "'eager'. Batched left-padded option scoring is invalid on this "
+            "stack with SDPA -- it silently collapses predictions onto a single "
+            "option instead of erroring. Refusing to produce numbers.")
+
+
 # ----------------------------------------------------------------------------- #
 # Content-free prompts for contextual calibration (Zhao et al. 2021).
 #
@@ -325,6 +346,7 @@ def load_model(path):
     model = AutoModelForCausalLM.from_pretrained(
         path, torch_dtype=torch.bfloat16, device_map="auto",
         attn_implementation="eager")
+    assert_eager(model, path)
     model.eval()
     return model, tok
 

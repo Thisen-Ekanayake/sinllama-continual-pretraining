@@ -289,6 +289,15 @@ def load_model(path):
     model = AutoModelForCausalLM.from_pretrained(
         path, torch_dtype=torch.bfloat16, device_map="auto",
         attn_implementation="eager")
+    # see evaluate_sinhala_mmlu.assert_eager: SDPA silently collapses batched
+    # left-padded option scoring on this stack (cost SinLlama_cpt 6-7pp once)
+    impl = getattr(model.config, "_attn_implementation", None)
+    if impl != "eager":
+        raise SystemExit(
+            f"FATAL: {path} loaded with attn_implementation={impl!r}, not "
+            "'eager'. Batched left-padded option scoring is invalid on this "
+            "stack with SDPA -- it silently collapses predictions onto a single "
+            "option instead of erroring. Refusing to produce numbers.")
     model.eval()
     return model, tok
 
