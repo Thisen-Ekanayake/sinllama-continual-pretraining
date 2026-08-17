@@ -18,12 +18,29 @@ cd "$REPO_DIR"
 BUCKET="${BUCKET:-gs://sinllama_cpt}"
 MODELS="${MODELS:-SinLlama_v02 SinLlama_uc_instruct_cleaned}"
 
-GSUTIL="$(command -v gsutil || echo "$HOME/google-cloud-sdk/bin/gsutil")"
-if [[ ! -x "$GSUTIL" ]]; then
+# The Cloud SDK has landed in a different place on every pod so far (~/, and
+# inside the repo checkout), and it is never on a non-interactive PATH. Search
+# instead of assuming.
+find_gsutil() {
+  local c
+  c="$(command -v gsutil 2>/dev/null)" && [[ -x "$c" ]] && { echo "$c"; return; }
+  for c in "$HOME/google-cloud-sdk/bin/gsutil" \
+           "$REPO_DIR/google-cloud-sdk/bin/gsutil" \
+           "/usr/lib/google-cloud-sdk/bin/gsutil" \
+           "/snap/bin/gsutil"; do
+    [[ -x "$c" ]] && { echo "$c"; return; }
+  done
+  c="$(find "$HOME" -maxdepth 4 -name gsutil -type f -perm -u+x 2>/dev/null | head -1)"
+  [[ -n "$c" ]] && echo "$c"
+}
+
+GSUTIL="$(find_gsutil)"
+if [[ -z "$GSUTIL" || ! -x "$GSUTIL" ]]; then
   echo "gsutil not found. Install the Cloud SDK, or add it to PATH:" >&2
   echo "  export PATH=\$PATH:~/google-cloud-sdk/bin" >&2
   exit 1
 fi
+echo "using gsutil: $GSUTIL"
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 fail=0

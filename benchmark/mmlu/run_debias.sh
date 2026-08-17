@@ -63,6 +63,21 @@ EN_BS="${EN_BS:-16}"
 
 PY="${PY:-python}"
 
+# same search as setup_debias_pod.sh -- the SDK is never on a non-interactive
+# PATH and has moved between pods
+find_gsutil() {
+  local c
+  c="$(command -v gsutil 2>/dev/null)" && [[ -x "$c" ]] && { echo "$c"; return; }
+  for c in "$HOME/google-cloud-sdk/bin/gsutil" \
+           "$REPO_DIR/google-cloud-sdk/bin/gsutil" \
+           "/usr/lib/google-cloud-sdk/bin/gsutil" \
+           "/snap/bin/gsutil"; do
+    [[ -x "$c" ]] && { echo "$c"; return; }
+  done
+  c="$(find "$HOME" -maxdepth 4 -name gsutil -type f -perm -u+x 2>/dev/null | head -1)"
+  [[ -n "$c" ]] && echo "$c"
+}
+
 log() { printf '\n\033[1m[%s] %s\033[0m\n' "$(date +%H:%M:%S)" "$*"; }
 run() {
   if [[ "$DRY_RUN" == "1" ]]; then printf '  DRY: %s\n' "$*"; return 0; fi
@@ -148,8 +163,8 @@ for lang in $LANGS; do
     fi
 
     if [[ -n "$BUCKET" && "$DRY_RUN" != "1" ]]; then
-      GSUTIL="$(command -v gsutil || echo "$HOME/google-cloud-sdk/bin/gsutil")"
-      if [[ -x "$GSUTIL" ]]; then
+      GSUTIL="$(find_gsutil)"
+      if [[ -n "$GSUTIL" && -x "$GSUTIL" ]]; then
         "$GSUTIL" -m -q cp -r "$OUT" "$BUCKET/" \
           && echo "  uploaded -> $BUCKET/$(basename "$OUT")" \
           || echo "  WARNING: upload failed for $OUT" >&2
