@@ -22,6 +22,7 @@ yaml() { python3 "$YAML_GET" "$MAIN_YML" "$CFG_YML" "$@"; }
 mapfile -t MODEL_NAMES < <(yaml models --field name)
 mapfile -t MODEL_PATHS < <(yaml models --field path)
 mapfile -t ALPACA_MODELS < <(yaml alpaca_models)
+mapfile -t CHAT_MODELS < <(yaml chat_models)
 ALL_MODEL_PATHS=()
 for p in "${MODEL_PATHS[@]}"; do ALL_MODEL_PATHS+=("$REPO_DIR/$p"); done
 
@@ -55,6 +56,7 @@ for idx in "${!ALL_MODEL_PATHS[@]}"; do
     --data "$DATA" \
     --models "$MODEL" \
     --alpaca-models "${ALPACA_MODELS[@]}" \
+    --chat-models "${CHAT_MODELS[@]}" \
     --kshot "$KSHOT" --seed "$SEED" --batch-size "$BATCH_SIZE" --max-len "$MAX_LEN" --quant "$QUANT" \
     --out-dir "$OUT_DIR" --bucket "$BUCKET" --skip-existing \
     > "$OUT_DIR/${name}.log" 2>&1 &

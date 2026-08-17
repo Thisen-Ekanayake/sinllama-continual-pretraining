@@ -171,6 +171,40 @@ def to_alpaca(raw_prompt, block_fn):
 
 
 # ----------------------------------------------------------------------------- #
+# Chat-template wrapping, for models SFT'd on the UltraChat template in
+# sft/config.yaml: "### User:\n...\n\n### Assistant:\n...<|end_of_text|>",
+# turns joined by "\n\n". Same per-block trick as the Alpaca wrapper above.
+# ----------------------------------------------------------------------------- #
+CHAT_PROMPT = "### User:\n{}\n\n{}\n\n### Assistant:\n{}"
+CHAT_EOS = "<|end_of_text|>"
+
+
+def block_to_chat_si(block, eos=""):
+    before, cue, after = block.rpartition("Answer:")
+    instr, _, qbody = before.partition("\nQuestion:")
+    instruction = instr.strip()
+    input_text = ("Question:" + qbody).strip()
+    response = cue + after
+    return CHAT_PROMPT.format(instruction, input_text, response) + eos
+
+
+def block_to_chat_en(block, eos=""):
+    before, cue, after = block.rpartition("Answer:")
+    instruction, _, body = before.partition("\n")
+    response = cue + after
+    return CHAT_PROMPT.format(instruction.strip(), body.strip(), response) + eos
+
+
+def to_chat(raw_prompt, block_fn, eos=CHAT_EOS):
+    """Few-shot exemplars become completed turn pairs terminated by EOS, as in
+    training; the final (test) block gets none, so its answer token is scored."""
+    blocks = raw_prompt.split("\n\n")
+    wrapped = [block_fn(b, eos) for b in blocks[:-1]]
+    wrapped.append(block_fn(blocks[-1], ""))
+    return "\n\n".join(wrapped)
+
+
+# ----------------------------------------------------------------------------- #
 # Model loading — bf16 by default (cloud GPU, e.g. 20GB RTX 4000 Ada: an 8B
 # model in bf16 is ~16GB resident, comfortably clear of a quantized load's
 # accuracy trade-off). 4-bit/8-bit (bitsandbytes) remain available via --quant

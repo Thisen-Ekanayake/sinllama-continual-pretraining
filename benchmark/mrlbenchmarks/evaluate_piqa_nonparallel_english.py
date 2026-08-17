@@ -69,6 +69,9 @@ def main():
                              "../models/SinLlama_cpt", "../models/SinLlama_Bactrianx_Instruct"])
     ap.add_argument("--alpaca-models", nargs="*", default=["SinLlama_Bactrianx_Instruct"],
                     help="model-name substrings to score in the Alpaca template")
+    ap.add_argument("--chat-models", nargs="*", default=[],
+                    help="model-name substrings to score in the UltraChat "
+                         "### User/### Assistant template")
     ap.add_argument("--out-dir", default="results_nonparallel_english")
     ap.add_argument("--kshot", type=int, default=8, help="# balanced few-shot exemplars, held out (0 = zero-shot)")
     ap.add_argument("--seed", type=int, default=0, help="exemplar selection seed")
@@ -122,7 +125,8 @@ def main():
     for path in args.models:
         name = os.path.basename(path.rstrip("/"))
         use_alpaca = any(s in name for s in args.alpaca_models)
-        fmt = "alpaca" if use_alpaca else "raw"
+        use_chat = (not use_alpaca) and any(s in name for s in args.chat_models)
+        fmt = "alpaca" if use_alpaca else ("chat" if use_chat else "raw")
         mpath = os.path.join(args.out_dir, f"{name}_metrics.json")
         if args.skip_existing and os.path.exists(mpath):
             m = json.load(open(mpath, encoding="utf-8"))
@@ -138,6 +142,9 @@ def main():
             if use_alpaca:
                 for r in records:
                     r["prompt"] = C.to_alpaca(r["prompt"], C.block_to_alpaca_en)
+            elif use_chat:
+                for r in records:
+                    r["prompt"] = C.to_chat(r["prompt"], C.block_to_chat_en)
             C.evaluate_letters(model, tok, records, args.batch_size, args.max_len)
             m = C.compute_metrics(records, GROUP_KEYS)
             m["format"] = fmt
