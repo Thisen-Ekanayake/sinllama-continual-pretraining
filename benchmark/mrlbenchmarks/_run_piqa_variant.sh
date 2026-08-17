@@ -19,6 +19,13 @@ source "$BENCH_DIR/lib/gcs_upload.sh"
 
 yaml() { python3 "$YAML_GET" "$MAIN_YML" "$CFG_YML" "$@"; }
 
+# The evaluate_piqa_* scripts import `benchmark.mrlbenchmarks.common`, i.e. by
+# package path from the repo root, so the repo root must be importable. Without
+# this every model fails with ModuleNotFoundError before loading any weights --
+# and because the evals run as background jobs under `set +e`, the driver still
+# reports success. Keep this export.
+export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
 mapfile -t MODEL_NAMES < <(yaml models --field name)
 mapfile -t MODEL_PATHS < <(yaml models --field path)
 mapfile -t ALPACA_MODELS < <(yaml alpaca_models)
