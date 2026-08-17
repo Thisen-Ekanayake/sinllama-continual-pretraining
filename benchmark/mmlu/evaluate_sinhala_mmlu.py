@@ -139,6 +139,37 @@ def to_alpaca(raw_prompt):
     return "\n\n".join(block_to_alpaca(b) for b in raw_prompt.split("\n\n"))
 
 
+# ----------------------------------------------------------------------------- #
+# Chat-format wrapping, for models SFT'd on the UltraChat template in
+# sft/config.yaml: "### User:\n...\n\n### Assistant:\n...<|end_of_text|>",
+# turns joined by "\n\n". Structurally the same trick as the Alpaca wrapper
+# above -- one turn pair per few-shot block, answer cue left in the assistant
+# slot so the digit is still the next token predicted.
+# ----------------------------------------------------------------------------- #
+CHAT_PROMPT = "### User:\n{}\n\n{}\n\n### Assistant:\n{}"
+CHAT_EOS = "<|end_of_text|>"
+
+
+def block_to_chat(block, eos=""):
+    """Re-wrap one rendered MMLU block as a user/assistant turn pair."""
+    before, cue, after = block.rpartition("පිළිතුර:")   # cue only at the answer slot
+    instr, _, qbody = before.partition("\nප්‍රශ්නය:")
+    instruction = instr.strip()
+    input_text = ("ප්‍රශ්නය:" + qbody).strip()
+    response = cue + after                               # "පිළිතුර: " or "පිළිතුර: 3"
+    return CHAT_PROMPT.format(instruction, input_text, response) + eos
+
+
+def to_chat(raw_prompt, eos=CHAT_EOS):
+    """Every few-shot exemplar becomes a completed turn pair terminated by EOS,
+    exactly as in training. The final (test) block gets NO terminator: it must
+    end at 'පිළිතුර: ' so the answer digit is the next token scored."""
+    blocks = raw_prompt.split("\n\n")
+    wrapped = [block_to_chat(b, eos) for b in blocks[:-1]]
+    wrapped.append(block_to_chat(blocks[-1], ""))
+    return "\n\n".join(wrapped)
+
+
 def build_fewshot_index(data_root, k):
     """difficulty -> subject_key -> formatted-exemplar list (raw dicts)."""
     idx = {}
@@ -455,6 +486,11 @@ def main():
                     help="model-name substrings to score in the Alpaca "
                          "### Instruction/Input/Response template they were SFT'd "
                          "on (e.g. SinLlama_Backtrianx_instruct)")
+    ap.add_argument("--chat-models", nargs="*", default=[],
+                    help="model-name substrings to score in the UltraChat "
+                         "### User/### Assistant chat template they were SFT'd on "
+                         "(e.g. SinLlama_uc_instruct). Ignored for a model that "
+                         "also matches --alpaca-models.")
     ap.add_argument("--out-dir", default="results")
     ap.add_argument("--kshot", type=int, default=3)
     ap.add_argument("--batch-size", type=int, default=16)   # bump on large GPUs
@@ -516,7 +552,8 @@ def main():
     for path in args.models:
         name = os.path.basename(path.rstrip("/"))
         use_alpaca = any(s in name for s in args.alpaca_models)
-        fmt = "alpaca" if use_alpaca else "raw"
+        use_chat = (not use_alpaca) and any(s in name for s in args.chat_models)
+        fmt = "alpaca" if use_alpaca else ("chat" if use_chat else "raw")
         mpath = os.path.join(args.out_dir, f"{name}_metrics.json")
         if args.skip_existing and os.path.exists(mpath):
             m = json.load(open(mpath, encoding="utf-8"))
@@ -531,6 +568,9 @@ def main():
             if use_alpaca:                             # re-wrap in the SFT template
                 for r in records:
                     r["prompt"] = to_alpaca(r["prompt"])
+            elif use_chat:                             # ... or the chat template
+                for r in records:
+                    r["prompt"] = to_chat(r["prompt"])
             evaluate(model, tok, records, args.batch_size, args.max_len)
             m = compute_metrics(records)
             m["format"] = fmt                          # persist into metrics.json

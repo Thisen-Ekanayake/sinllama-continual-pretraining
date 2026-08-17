@@ -21,6 +21,7 @@ yaml() { python3 "$YAML_GET" "$MAIN_YML" "$CFG_YML" "$@"; }
 mapfile -t MODEL_NAMES < <(yaml models --field name)
 mapfile -t MODEL_PATHS < <(yaml models --field path)
 mapfile -t ALPACA_MODELS < <(yaml alpaca_models)
+mapfile -t CHAT_MODELS < <(yaml chat_models)
 
 DATA_ROOT="$REPO_DIR/$(yaml datasets.mmlu.sinhala)"
 PROMPT_FILE="$REPO_DIR/$(yaml sinhala.prompt_file)"
@@ -54,6 +55,7 @@ for idx in "${!ALL_MODEL_PATHS[@]}"; do
     --prompt-file   "$PROMPT_FILE" \
     --models        "$MODEL" \
     --alpaca-models "${ALPACA_MODELS[@]}" \
+    --chat-models "${CHAT_MODELS[@]}" \
     --kshot "$KSHOT" --batch-size "$BATCH_SIZE" --max-len "$MAX_LEN" \
     --out-dir "$OUT_DIR" --bucket "$BUCKET" --skip-existing \
     > "$OUT_DIR/${name}.log" 2>&1 &

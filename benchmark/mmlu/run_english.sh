@@ -27,6 +27,7 @@ export PATH="$HOME/google-cloud-sdk/bin:$PATH"
 mapfile -t MODEL_NAMES < <(yaml models --field name)
 mapfile -t MODEL_PATHS < <(yaml models --field path)
 mapfile -t ALPACA_MODELS < <(yaml alpaca_models)
+mapfile -t CHAT_MODELS < <(yaml chat_models)
 
 DATA_ROOT="$REPO_DIR/$(yaml datasets.mmlu.english)"
 KSHOT="$(yaml english.kshot)"
@@ -54,6 +55,8 @@ fi
 
 ALPACA_ARG=()
 [[ "${#ALPACA_MODELS[@]}" -gt 0 ]] && ALPACA_ARG=(--alpaca-models "${ALPACA_MODELS[@]}")
+CHAT_ARG=()
+[[ "${#CHAT_MODELS[@]}" -gt 0 ]] && CHAT_ARG=(--chat-models "${CHAT_MODELS[@]}")
 
 mkdir -p "$OUT_DIR"
 export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
@@ -74,7 +77,7 @@ for idx in "${!ALL_MODEL_PATHS[@]}"; do
   python -u "$SCRIPT_DIR/evaluate_english_mmlu.py" \
     --data-root "$DATA_ROOT" \
     --models    "$MODEL" \
-    "${ALPACA_ARG[@]}" "${STYLE_ARGS[@]}" \
+    "${ALPACA_ARG[@]}" "${CHAT_ARG[@]}" "${STYLE_ARGS[@]}" \
     --kshot "$KSHOT" --batch-size "$BATCH_SIZE" --max-len "$MAX_LEN" \
     --out-dir "$OUT_DIR" --bucket "$BUCKET" --skip-existing \
     > "$OUT_DIR/${name}.log" 2>&1 &

@@ -36,6 +36,15 @@ models:
 alpaca_models:
   - SinLlama_Bactrianx_Instruct
 
+# Model-name substrings scored in the UltraChat chat template
+# ("### User:\n...\n\n### Assistant:\n...<|end_of_text|>") from sft/config.yaml,
+# the analogue of alpaca_models above. Leave EMPTY to score every model raw --
+# raw is what makes an instruct model's number comparable to its own base, while
+# the chat format is what the model actually saw in training. Both are worth
+# having; see docs/uc-instruct-evaluation.md.
+chat_models:
+  - SinLlama_uc_instruct
+
 datasets:
   mmlu:
     sinhala: benchmark/mmlu/SinhalaMMLU

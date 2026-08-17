@@ -165,6 +165,33 @@ def to_alpaca(raw_prompt):
 
 
 # ----------------------------------------------------------------------------- #
+# Chat-format wrapping, for models SFT'd on the UltraChat template in
+# sft/config.yaml ("### User:\n...\n\n### Assistant:\n...<|end_of_text|>").
+# ----------------------------------------------------------------------------- #
+CHAT_PROMPT = "### User:\n{}\n\n{}\n\n### Assistant:\n{}"
+CHAT_EOS = "<|end_of_text|>"
+
+
+def block_to_chat(block, eos=""):
+    """Re-wrap one rendered block as a user/assistant turn pair. The 'Answer:'
+    cue stays in the assistant slot with no trailing space, so the model still
+    predicts the ' A' letter token."""
+    before, cue, after = block.rpartition("Answer:")   # cue only at answer slot
+    instruction, _, body = before.partition("\n")      # first line = instruction
+    response = cue + after                              # 'Answer:' or 'Answer: A'
+    return CHAT_PROMPT.format(instruction.strip(), body.strip(), response) + eos
+
+
+def to_chat(raw_prompt, eos=CHAT_EOS):
+    """Exemplars become completed turn pairs terminated by EOS, as in training;
+    the final (test) block gets none, so the answer letter is scored next."""
+    blocks = raw_prompt.split("\n\n")
+    wrapped = [block_to_chat(b, eos) for b in blocks[:-1]]
+    wrapped.append(block_to_chat(blocks[-1], ""))
+    return "\n\n".join(wrapped)
+
+
+# ----------------------------------------------------------------------------- #
 # Data
 # ----------------------------------------------------------------------------- #
 def _read_split(data_root, split):
@@ -493,6 +520,10 @@ def main():
                              "SinLlama_cpt_merged", "SinLlama_Backtrianx_instruct"])
     ap.add_argument("--alpaca-models", nargs="*", default=[],
                     help="model-name substrings to score in the Alpaca template")
+    ap.add_argument("--chat-models", nargs="*", default=[],
+                    help="model-name substrings to score in the UltraChat "
+                         "### User/### Assistant template. Ignored for a model "
+                         "that also matches --alpaca-models, and under --canonical.")
     ap.add_argument("--out-dir", default="results_english")
     ap.add_argument("--kshot", type=int, default=5)
     ap.add_argument("--batch-size", type=int, default=16)
@@ -550,7 +581,10 @@ def main():
     for path in args.models:
         name = os.path.basename(path.rstrip("/"))
         use_alpaca = (not args.canonical) and any(s in name for s in args.alpaca_models)
-        fmt = "canonical" if args.canonical else ("alpaca" if use_alpaca else "raw")
+        use_chat = (not args.canonical) and (not use_alpaca) \
+            and any(s in name for s in args.chat_models)
+        fmt = "canonical" if args.canonical else (
+            "alpaca" if use_alpaca else ("chat" if use_chat else "raw"))
         mpath = os.path.join(args.out_dir, f"{name}_metrics.json")
         if args.skip_existing and os.path.exists(mpath):
             m = json.load(open(mpath, encoding="utf-8"))
@@ -566,10 +600,17 @@ def main():
             if use_alpaca:
                 for r in records:
                     r["prompt"] = to_alpaca(r["prompt"])
+            elif use_chat:
+                for r in records:
+                    r["prompt"] = to_chat(r["prompt"])
             cf_bias = None
             if args.calibrate:
-                cfp = {s: to_alpaca(p) for s, p in cf_prompts.items()} if use_alpaca \
-                      else cf_prompts
+                if use_alpaca:
+                    cfp = {s: to_alpaca(p) for s, p in cf_prompts.items()}
+                elif use_chat:
+                    cfp = {s: to_chat(p) for s, p in cf_prompts.items()}
+                else:
+                    cfp = cf_prompts
                 cf_bias = compute_cf_bias(model, tok, cfp, args.max_len)
             evaluate(model, tok, records, args.batch_size, args.max_len, cf_bias)
             m = compute_metrics(records)
