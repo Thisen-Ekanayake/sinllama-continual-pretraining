@@ -62,6 +62,7 @@ Macro-F1 %.
 | SinLlama_v02 | 91.47 | 79.61 | 97.66 |
 | Bactrianx-Instruct | 90.81 | 76.95 | 97.06 |
 | uc_instruct_cleaned | 91.08 | 78.76 | **98.33** |
+
 ## Findings
 
 1. **Sinhala adaptation is real; English pays for it.** v02 gains 9.6pp of
