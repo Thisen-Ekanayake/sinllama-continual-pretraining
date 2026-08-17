@@ -138,14 +138,30 @@ def build():
     return "\n".join(lines), mc, down
 
 
+# Global-PIQA runs 92-95 items per variant, so one answer moves the score 1.1pp
+# and re-running the same model has been observed to move it 4.21pp. Marking a
+# "winner" in those columns would dress noise up as a result, so they are
+# excluded from the bolding and flagged in the header instead.
+NOISY = {"PIQA-Si-p", "PIQA-En-p", "PIQA-Si-n", "PIQA-En-n"}
+
+
 def best_marked(rows, higher_is_better=True):
-    """Bold the winning cell of each column. rows: {model: {col: value|None}}."""
+    """Bold the winning cell of each column. rows: {model: {col: value|None}}.
+
+    A column is skipped entirely when the top score is tied — an arbitrary
+    tie-break rendered in bold reads as a finding that is not there.
+    """
     cols = {c for r in rows.values() for c in r}
     best = {}
     for c in cols:
+        if c in NOISY:
+            continue
         vals = [(m, r[c]) for m, r in rows.items() if r.get(c) is not None]
-        if vals:
-            best[c] = (max if higher_is_better else min)(vals, key=lambda t: t[1])[0]
+        if not vals:
+            continue
+        pick = (max if higher_is_better else min)(vals, key=lambda t: t[1])
+        if sum(1 for _, v in vals if v == pick[1]) == 1:
+            best[c] = pick[0]
     return best
 
 
@@ -177,18 +193,52 @@ def report():
     down_f1 = {d: {t: (down[d][t] or {}).get("f1_macro") for t, _, _ in DOWN_TASKS}
                for d, _ in MODELS}
 
+    # deltas against the finetuned base model
+    base = MODELS[0][0]
+    down_delta = {d: {t: (None if down_acc[d][t] is None or down_acc[base][t] is None
+                          else down_acc[d][t] - down_acc[base][t])
+                      for t, _, _ in DOWN_TASKS} for d, _ in MODELS}
+
+    cols_mc = [t + (" †" if t in NOISY else "") for t, _, _ in MC_TASKS]
+    mc_rows_lbl = {m: {c: r[c.removesuffix(" †")] for c in cols_mc} for m, r in mc_rows.items()}
+    best_mc = {c: v for c, v in
+               ((c, best_marked(mc_rows).get(c.removesuffix(" †"))) for c in cols_mc) if v}
+
     L = []
     L.append("## Zero-shot / few-shot knowledge and reasoning\n")
-    L.append("Accuracy %, all raw-prompt scored, higher is better.\n")
-    L.append(table(mc_rows, [t for t, _, _ in MC_TASKS], best_marked(mc_rows)))
+    L.append("Accuracy %, all raw-prompt scored, higher is better. "
+             "**Bold** marks an outright column winner.\n")
+    L.append(table(mc_rows_lbl, cols_mc, best_mc))
     L.append("")
-    L.append("Items: " + ", ".join(f"`{t}` n={ns[t]}" for t, _, _ in MC_TASKS) + "\n")
+    L.append("Items: " + ", ".join(f"`{t}` n={ns[t]}" for t, _, _ in MC_TASKS))
+    L.append("")
+    L.append("† Global-PIQA. At n=92–95 one item is 1.1pp and the same model re-run "
+             "has moved 4.21pp, so these four columns are below the noise floor: no "
+             "winner is marked and no gap in them should be read as a result.\n")
 
     L.append("## Downstream, after per-model LoRA finetuning\n")
-    L.append("Test accuracy %.\n")
-    L.append(table(down_acc, [t for t, _, _ in DOWN_TASKS], best_marked(down_acc)))
+    L.append("Test accuracy %, with the change against finetuned "
+             f"{base} in brackets.\n")
+    acc_lbl = {m: {t: down_acc[m][t] for t, _, _ in DOWN_TASKS} for m, _ in MODELS}
+    rows_out = ["| model | " + " | ".join(t for t, _, _ in DOWN_TASKS) + " |",
+                "|" + "---|" * (len(DOWN_TASKS) + 1)]
+    bm = best_marked(acc_lbl)
+    for m, _ in MODELS:
+        cells = []
+        for t, _, _ in DOWN_TASKS:
+            v, dv = down_acc[m][t], down_delta[m][t]
+            if v is None:
+                cells.append("--")
+                continue
+            s = f"**{v:.2f}**" if bm.get(t) == m else f"{v:.2f}"
+            if dv is not None and m != base:
+                s += f" ({dv:+.2f})"
+            cells.append(s)
+        rows_out.append(f"| {m} | " + " | ".join(cells) + " |")
+    L.append("\n".join(rows_out))
     L.append("\nMacro-F1 %.\n")
     L.append(table(down_f1, [t for t, _, _ in DOWN_TASKS], best_marked(down_f1)))
+    L.append("")
     return "\n".join(L)
 
 

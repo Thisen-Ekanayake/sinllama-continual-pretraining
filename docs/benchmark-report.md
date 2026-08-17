@@ -1,8 +1,12 @@
 # SinLlama benchmark report
 
 Six checkpoints scored 2026-08-17 on Sinhala/English knowledge, commonsense
-reasoning, and three downstream Sinhala classification tasks. Published as an
-artifact; this file is the version-controlled copy.
+reasoning, and three downstream Sinhala classification tasks.
+
+Also published as a page:
+<https://claude.ai/code/artifact/24867c49-6df3-44d7-ab58-487bdb9336c6>
+(same numbers, with chance-level markers on each bar). This file is the
+version-controlled copy and the one to edit.
 
 Tables below are generated — regenerate with:
 
@@ -20,31 +24,33 @@ python benchmark/collect_report.py --full
 
 ## Zero-shot / few-shot knowledge and reasoning
 
-Accuracy %, all raw-prompt scored, higher is better.
+Accuracy %, all raw-prompt scored, higher is better. **Bold** marks an outright column winner.
 
-| model | MMLU-Si | MMLU-En | PIQA-Si-p | PIQA-En-p | PIQA-Si-n | PIQA-En-n |
+| model | MMLU-Si | MMLU-En | PIQA-Si-p † | PIQA-En-p † | PIQA-Si-n † | PIQA-En-n † |
 |---|---|---|---|---|---|---|
-| Llama-3-8B | 32.48 | **65.54** | 31.58 | **58.95** | 57.61 | **68.48** |
-| SinLlama_v01 | 37.85 | 48.38 | **47.37** | 49.47 | 55.43 | 50.00 |
+| Llama-3-8B | 32.48 | **65.54** | 31.58 | 58.95 | 57.61 | 68.48 |
+| SinLlama_v01 | 37.85 | 48.38 | 47.37 | 49.47 | 55.43 | 50.00 |
 | SinLlama_cpt | 35.72 | 39.39 | 35.79 | 41.05 | 59.78 | 48.91 |
-| SinLlama_v02 | **42.09** | 51.00 | 47.37 | 51.58 | **61.96** | 55.43 |
+| SinLlama_v02 | **42.09** | 51.00 | 47.37 | 51.58 | 61.96 | 55.43 |
 | Bactrianx-Instruct | 27.71 | 32.67 | 31.58 | 27.37 | 52.17 | 52.17 |
 | uc_instruct_cleaned | 39.02 | 50.35 | 47.37 | 48.42 | 54.35 | 50.00 |
 
 Items: `MMLU-Si` n=6878, `MMLU-En` n=14042, `PIQA-Si-p` n=95, `PIQA-En-p` n=95, `PIQA-Si-n` n=92, `PIQA-En-n` n=92
 
+† Global-PIQA. At n=92–95 one item is 1.1pp and the same model re-run has moved 4.21pp, so these four columns are below the noise floor: no winner is marked and no gap in them should be read as a result.
+
 ## Downstream, after per-model LoRA finetuning
 
-Test accuracy %.
+Test accuracy %, with the change against finetuned Llama-3-8B in brackets.
 
 | model | News | Sentiment | Writing |
 |---|---|---|---|
 | Llama-3-8B | 87.69 | 71.48 | 92.57 |
-| SinLlama_v01 | 91.08 | 79.58 | 98.32 |
-| SinLlama_cpt | **93.85** | **79.91** | 98.32 |
-| SinLlama_v02 | 92.31 | 79.69 | 97.92 |
-| Bactrianx-Instruct | 91.69 | 77.03 | 97.44 |
-| uc_instruct_cleaned | 91.69 | 78.91 | **98.48** |
+| SinLlama_v01 | 91.08 (+3.39) | 79.58 (+8.10) | 98.32 (+5.75) |
+| SinLlama_cpt | **93.85** (+6.16) | **79.91** (+8.43) | 98.32 (+5.75) |
+| SinLlama_v02 | 92.31 (+4.62) | 79.69 (+8.21) | 97.92 (+5.35) |
+| Bactrianx-Instruct | 91.69 (+4.00) | 77.03 (+5.55) | 97.44 (+4.87) |
+| uc_instruct_cleaned | 91.69 (+4.00) | 78.91 (+7.43) | **98.48** (+5.91) |
 
 Macro-F1 %.
 
