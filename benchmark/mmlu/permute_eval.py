@@ -225,6 +225,45 @@ def _score_jobs(model, tok, chunk, option_ids, max_len, out):
             _score_jobs(model, tok, chunk[mid:], option_ids, max_len, out)
 
 
+def make_batches(jobs, tok, max_bs, max_len, budget):
+    """Group jobs into batches under a B*S^2 memory budget.
+
+    EAGER attention materialises a [B, heads, S, S] score tensor, so peak memory
+    grows with batch size times the square of the batch's longest sequence -- not
+    linearly in tokens. Batching purely by count is therefore unsafe once the
+    batch happens to contain long prompts: at B=16, S=4096, 32 heads, bf16 that
+    single tensor is ~17 GB, which aborts the HIP runtime outright rather than
+    raising a catchable torch OOM (observed: SIGABRT, no Python traceback, so the
+    recursive split in _score_jobs never runs).
+
+    Sorting longest-first for padding efficiency makes this *worse*, because it
+    puts all the longest prompts in the same batch. So: sort by length, then cut
+    batches whenever B*S^2 would exceed the budget. Short prompts still batch
+    densely up to max_bs; only the long tail is throttled."""
+    lens = []
+    B = 512
+    for i in range(0, len(jobs), B):
+        enc = tok([j["prompt"] for j in jobs[i:i + B]], add_special_tokens=True)
+        lens.extend(min(len(x), max_len) for x in enc["input_ids"])
+    order = sorted(range(len(jobs)), key=lambda i: -lens[i])
+
+    batches, cur, cur_max = [], [], 0
+    for i in order:
+        nmax = max(cur_max, lens[i])
+        if cur and ((len(cur) + 1) * nmax * nmax > budget or len(cur) >= max_bs):
+            batches.append(cur)
+            cur, cur_max = [jobs[i]], lens[i]
+        else:
+            cur.append(jobs[i])
+            cur_max = nmax
+    if cur:
+        batches.append(cur)
+    longest = max(lens) if lens else 0
+    print(f"  {len(batches)} batches (max seq {longest}, "
+          f"largest batch {max(len(b) for b in batches) if batches else 0})")
+    return batches
+
+
 def run_model(adapter, path, records0, args):
     name = os.path.basename(path.rstrip("/"))
     use_alpaca = any(s in name for s in args.alpaca_models)
@@ -249,11 +288,10 @@ def run_model(adapter, path, records0, args):
     out = defaultdict(lambda: {"sum": [0.0] * 8, "k": 0, "raw": None,
                                "failed": False})
 
-    # longest-first so the worst OOM offenders are hit while memory is clean
-    jobs.sort(key=lambda j: -len(j["prompt"]))
-    for i in tqdm(range(0, len(jobs), args.batch_size), desc="  permute"):
-        _score_jobs(model, tok, jobs[i:i + args.batch_size], option_ids,
-                    args.max_len, out)
+    batches = make_batches(jobs, tok, args.batch_size, args.max_len,
+                           args.attn_budget)
+    for b in tqdm(batches, desc="  permute"):
+        _score_jobs(model, tok, b, option_ids, args.max_len, out)
 
     n_failed = 0
     for idx, r in enumerate(records):
@@ -330,6 +368,11 @@ def main():
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-len", type=int, default=4096)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--attn-budget", type=float, default=4.0e7,
+                    help="max batch_size * seq_len^2 per batch. Eager attention "
+                         "allocates [B, heads, S, S], so this -- not token count "
+                         "-- is what bounds peak memory. Default allows B=16 at "
+                         "S=1580, B=4 at S=3162, B=2 at S=4096.")
     ap.add_argument("--rotations", type=int, default=0,
                     help="0 = full cyclic (n rotations per item, the default "
                          "and the only fully unbiased setting); a smaller "
