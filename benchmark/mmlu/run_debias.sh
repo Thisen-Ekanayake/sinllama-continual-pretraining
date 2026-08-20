@@ -60,6 +60,21 @@ SI_BS="${SI_BS:-16}"
 EN_BS="${EN_BS:-16}"
 PY="${PY:-python}"
 
+# Parallel dispatch: run up to MAX_PARALLEL units concurrently on one GPU,
+# gated on LIVE free VRAM rather than a static per-job guess (job footprint
+# varies a lot by model -- llama-3-8b byte-falls-back to much longer Sinhala
+# prompts than the SinLlama line, so a fixed estimate would be wrong for one
+# or the other). Default 1 preserves the old fully-serial behaviour.
+MAX_PARALLEL="${MAX_PARALLEL:-1}"
+VRAM_RESERVE_MB="${VRAM_RESERVE_MB:-51200}"     # keep this much free, always
+VRAM_LAUNCH_MARGIN_MB="${VRAM_LAUNCH_MARGIN_MB:-20000}"  # + this much slack
+                                                  # before greenlighting a NEW
+                                                  # launch, since a job's memory
+                                                  # keeps growing for ~30-60s
+                                                  # after the process starts
+                                                  # (model load, then first batch)
+VRAM_POLL_SECS="${VRAM_POLL_SECS:-15}"
+
 STATUS_FILE="$OUT_ROOT/debias_progress.txt"
 START_EPOCH=$(date +%s)
 
@@ -78,6 +93,30 @@ find_gsutil() {
   [[ -n "$c" ]] && echo "$c"
 }
 GSUTIL="$(find_gsutil)"
+
+# ---------------------------------------------------------------------------- #
+# Live VRAM query, for the parallel dispatcher below. rocm-smi reports total
+# GPU usage across ALL processes (this study's own jobs and anything else on
+# the box), which is exactly what we want to gate on -- we don't try to
+# attribute usage to a specific job, we just never let free memory drop below
+# VRAM_RESERVE_MB, full stop.
+# ---------------------------------------------------------------------------- #
+find_rocm_smi() {
+  command -v rocm-smi 2>/dev/null && return
+  for c in /opt/rocm/bin/rocm-smi; do [[ -x "$c" ]] && { echo "$c"; return; }; done
+}
+ROCM_SMI="$(find_rocm_smi)"
+
+vram_free_mb() {
+  if [[ -z "$ROCM_SMI" ]]; then echo -1; return; fi   # unknown -> caller must decide
+  local out total used
+  out="$("$ROCM_SMI" --showmeminfo vram 2>/dev/null)"
+  total="$(grep -oE 'Total Memory \(B\): [0-9]+' <<<"$out" | head -1 | grep -oE '[0-9]+$')"
+  used="$(grep -oE 'Total Used Memory \(B\): [0-9]+' <<<"$out" | head -1 | grep -oE '[0-9]+$')"
+  if [[ -z "$total" || -z "$used" ]]; then echo -1; return; fi
+  echo $(( (total - used) / 1024 / 1024 ))
+}
+
 
 tag_for() { [[ "$1" == "sinhala" ]] && echo SinhalaMMLU || echo EnglishMMLU; }
 outdir_for() { echo "$OUT_ROOT/$(tag_for "$1")_results_$2"; }
@@ -178,80 +217,177 @@ fi
 opt_list() { local flag="$1"; shift; [[ -n "${*// /}" ]] && printf '%s %s' "$flag" "$*"; }
 
 read -r -a _MODEL_ARR <<< "$MODELS"
-log "$TOTAL units: ${#_MODEL_ARR[@]} models x langs [$LANGS] x arms [$ARMS]"
+log "$TOTAL units: ${#_MODEL_ARR[@]} models x langs [$LANGS] x arms [$ARMS]  (max_parallel=$MAX_PARALLEL)"
 write_progress
 
-rc_overall=0
-IDX=0
-for u in "${UNITS[@]}"; do
-  IFS='|' read -r lang arm model <<< "$u"
-  name="$(basename "$model")"
-  OUT="$(outdir_for "$lang" "$arm")"
-  mkdir -p "$OUT"
-
-  if [[ "$FORCE" != "1" ]] && unit_done "$lang" "$arm" "$model"; then
-    UNIT_STATE["$u"]=skipped
-    UNIT_NOTE["$u"]="already present"
-    echo "  skip (done): $lang/$arm/$name"
-    write_progress
-    continue
-  fi
-
+# ---------------------------------------------------------------------------- #
+# Per-unit job launcher, shared by the serial and parallel paths.
+# ---------------------------------------------------------------------------- #
+build_cmd() {
+  local lang="$1" arm="$2" model="$3" out="$4"
+  local data bs eval_py extra
   case "$lang" in
-    sinhala) DATA=benchmark/mmlu/SinhalaMMLU; BS="$SI_BS"
-             EVAL=benchmark/mmlu/evaluate_sinhala_mmlu.py
-             EXTRA="--prompt-file benchmark/prompts/mmlu_sinhala.txt";;
-    english) DATA=benchmark/mmlu/english_mmlu; BS="$EN_BS"
-             EVAL=benchmark/mmlu/evaluate_english_mmlu.py
-             EXTRA="";;
+    sinhala) data=benchmark/mmlu/SinhalaMMLU; bs="$SI_BS"
+             eval_py=benchmark/mmlu/evaluate_sinhala_mmlu.py
+             extra="--prompt-file benchmark/prompts/mmlu_sinhala.txt";;
+    english) data=benchmark/mmlu/english_mmlu; bs="$EN_BS"
+             eval_py=benchmark/mmlu/evaluate_english_mmlu.py
+             extra="";;
   esac
-
-  IDX=$((IDX+1))
-  log "[$IDX/$TOTAL] $lang / $arm / $name"
-  t0=$(date +%s)
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "  DRY: $arm $lang $model"
-    UNIT_STATE["$u"]=done; UNIT_NOTE["$u"]="dry"
-    write_progress; continue
-  fi
-
   if [[ "$arm" == "permuted" ]]; then
     # shellcheck disable=SC2046
-    "$PY" benchmark/mmlu/permute_eval.py --lang "$lang" --models "$model" \
-      --data-root "$DATA" --out-dir "$OUT" --batch-size "$BS" --rotations 0 \
-      $EXTRA $(opt_list --chat-models $CHAT_MODELS) \
+    echo "$PY" benchmark/mmlu/permute_eval.py --lang "$lang" --models "$model" \
+      --data-root "$data" --out-dir "$out" --batch-size "$bs" --rotations 0 \
+      $extra $(opt_list --chat-models $CHAT_MODELS) \
       $(opt_list --alpaca-models $ALPACA_MODELS)
   else
     # shellcheck disable=SC2046
-    "$PY" "$EVAL" --models "$model" --data-root "$DATA" --out-dir "$OUT" \
-      --batch-size "$BS" --calibrate \
-      $EXTRA $(opt_list --chat-models $CHAT_MODELS) \
+    echo "$PY" "$eval_py" --models "$model" --data-root "$data" --out-dir "$out" \
+      --batch-size "$bs" --calibrate \
+      $extra $(opt_list --chat-models $CHAT_MODELS) \
       $(opt_list --alpaca-models $ALPACA_MODELS)
   fi
-  rc=$?
-  dt=$(( $(date +%s) - t0 ))
+}
 
+read_acc() {
+  "$PY" - "$1" <<'PYRD'
+import json,sys
+d=json.load(open(sys.argv[1])); o=d["overall"]
+raw=d.get("raw_arm",{}).get("accuracy")
+print(f"{o['accuracy']:.2f}%" + (f" (raw {raw:.2f}%)" if raw is not None else ""))
+PYRD
+}
+
+finish_unit() {   # called once a unit's process has exited
+  local u="$1" rc="$2" t0="$3" name="$4" lang="$5" arm="$6" model="$7" out="$8"
+  local dt=$(( $(date +%s) - t0 ))
   if [[ $rc -ne 0 ]] || ! unit_done "$lang" "$arm" "$model"; then
     UNIT_STATE["$u"]=failed
     UNIT_NOTE["$u"]="exit $rc after ${dt}s"
     echo "FAILED: $lang/$arm/$name (exit $rc)" >&2
     rc_overall=1
   else
-    acc=$("$PY" - "$OUT/${name}_metrics.json" <<'PYEOF' 2>/dev/null
-import json,sys
-d=json.load(open(sys.argv[1])); o=d["overall"]
-raw=d.get("raw_arm",{}).get("accuracy")
-print(f"{o['accuracy']:.2f}%" + (f" (raw {raw:.2f}%)" if raw is not None else ""))
-PYEOF
-)
+    local acc; acc=$(read_acc "$out/${name}_metrics.json")
     UNIT_STATE["$u"]=done
     UNIT_NOTE["$u"]="${acc:-ok} in ${dt}s"
-    echo "  ${acc:-ok} in ${dt}s"
-    upload_unit "$OUT" "$name"
+    echo "  [$lang/$arm/$name] ${acc:-ok} in ${dt}s"
+    upload_unit "$out" "$name"
   fi
   write_progress
+}
+
+rc_overall=0
+IDX=0
+
+# ---- collect the units that actually need running -------------------------- #
+RUN_UNITS=()
+for u in "${UNITS[@]}"; do
+  IFS='|' read -r lang arm model <<< "$u"
+  OUT="$(outdir_for "$lang" "$arm")"
+  mkdir -p "$OUT"
+  if [[ "$FORCE" != "1" ]] && unit_done "$lang" "$arm" "$model"; then
+    UNIT_STATE["$u"]=skipped
+    UNIT_NOTE["$u"]="already present"
+    echo "  skip (done): $lang/$arm/$(basename "$model")"
+  else
+    RUN_UNITS+=("$u")
+  fi
 done
+write_progress
+
+if [[ "$MAX_PARALLEL" -le 1 ]]; then
+  # -------------------------------------------------------------------------- #
+  # Serial path (default). Same behaviour as before parallel support existed.
+  # -------------------------------------------------------------------------- #
+  for u in "${RUN_UNITS[@]}"; do
+    IFS='|' read -r lang arm model <<< "$u"
+    name="$(basename "$model")"
+    OUT="$(outdir_for "$lang" "$arm")"
+    IDX=$((IDX+1))
+    log "[$IDX/$TOTAL] $lang / $arm / $name"
+    t0=$(date +%s)
+    if [[ "$DRY_RUN" == "1" ]]; then
+      echo "  DRY: $arm $lang $model"
+      UNIT_STATE["$u"]=done; UNIT_NOTE["$u"]="dry"; write_progress; continue
+    fi
+    cmd="$(build_cmd "$lang" "$arm" "$model" "$OUT")"
+    eval "$cmd"; rc=$?
+    finish_unit "$u" "$rc" "$t0" "$name" "$lang" "$arm" "$model" "$OUT"
+  done
+else
+  # -------------------------------------------------------------------------- #
+  # Parallel path: launch units in the background, gated on LIVE free VRAM.
+  # A unit is only launched when free - VRAM_RESERVE_MB >= VRAM_LAUNCH_MARGIN_MB;
+  # VRAM_RESERVE_MB is a hard floor, MAX_PARALLEL just caps on top of it. This
+  # reads GLOBAL GPU usage, so it coexists safely with a job started outside
+  # this script (e.g. a resumed run already in flight).
+  # -------------------------------------------------------------------------- #
+  declare -A JOB_PID JOB_T0 JOB_NAME JOB_LANG JOB_ARM JOB_MODEL JOB_OUT JOB_LOG
+  running=0
+  qi=0
+  total_run=${#RUN_UNITS[@]}
+
+  reap_one() {   # wait until at least one running job has exited, then finish it
+    while :; do
+      for u in "${!JOB_PID[@]}"; do
+        pid="${JOB_PID[$u]}"
+        if ! kill -0 "$pid" 2>/dev/null; then
+          wait "$pid"; local rc=$?
+          echo "  --- log tail [$u] ---"; tail -3 "${JOB_LOG[$u]}" 2>/dev/null
+          finish_unit "$u" "$rc" "${JOB_T0[$u]}" "${JOB_NAME[$u]}" \
+            "${JOB_LANG[$u]}" "${JOB_ARM[$u]}" "${JOB_MODEL[$u]}" "${JOB_OUT[$u]}"
+          unset 'JOB_PID[$u]' 'JOB_T0[$u]' 'JOB_NAME[$u]' 'JOB_LANG[$u]' \
+                'JOB_ARM[$u]' 'JOB_MODEL[$u]' 'JOB_OUT[$u]' 'JOB_LOG[$u]'
+          running=$((running-1))
+          return
+        fi
+      done
+      sleep "$VRAM_POLL_SECS"
+    done
+  }
+
+  while (( qi < total_run || running > 0 )); do
+    if (( qi < total_run && running < MAX_PARALLEL )); then
+      free_mb=$(vram_free_mb)
+      if [[ "$free_mb" == "-1" ]]; then
+        echo "  WARNING: rocm-smi not found, cannot verify VRAM -- launching without a guard" >&2
+        free_mb=999999
+      fi
+      if (( free_mb - VRAM_RESERVE_MB >= VRAM_LAUNCH_MARGIN_MB )); then
+        u="${RUN_UNITS[$qi]}"; qi=$((qi+1))
+        IFS='|' read -r lang arm model <<< "$u"
+        name="$(basename "$model")"
+        OUT="$(outdir_for "$lang" "$arm")"
+        IDX=$((IDX+1))
+        log "[$IDX/$TOTAL] launching $lang / $arm / $name  (free ${free_mb} MB, reserve $VRAM_RESERVE_MB MB)"
+        if [[ "$DRY_RUN" == "1" ]]; then
+          echo "  DRY: $arm $lang $model"
+          UNIT_STATE["$u"]=done; UNIT_NOTE["$u"]="dry"; write_progress; continue
+        fi
+        logf="$OUT/${name}.launch.log"
+        cmd="$(build_cmd "$lang" "$arm" "$model" "$OUT")"
+        eval "$cmd" > "$logf" 2>&1 &
+        pid=$!
+        JOB_PID["$u"]=$pid; JOB_T0["$u"]=$(date +%s); JOB_NAME["$u"]="$name"
+        JOB_LANG["$u"]="$lang"; JOB_ARM["$u"]="$arm"; JOB_MODEL["$u"]="$model"
+        JOB_OUT["$u"]="$OUT"; JOB_LOG["$u"]="$logf"
+        running=$((running+1))
+        # give the new process time to load its model and take a first batch
+        # before re-checking VRAM, so two loads don't stack and both overshoot
+        # the reserve before either has stabilised
+        sleep 60
+        continue
+      else
+        echo "  waiting for VRAM: free ${free_mb} MB, need >= $((VRAM_RESERVE_MB+VRAM_LAUNCH_MARGIN_MB)) MB"
+      fi
+    fi
+    if (( running > 0 )); then
+      reap_one
+    else
+      sleep "$VRAM_POLL_SECS"
+    fi
+  done
+fi
 
 log "comparing arms"
 "$PY" benchmark/mmlu/compare_debias.py --root "$OUT_ROOT" \
