@@ -1,0 +1,178 @@
+# gen/config.yaml
+# Stage-2 SFT: SinLlama_uc_instruct_cleaned on a bilingual UltraChat `gen` mix.
+#
+# Read by sft/run_sft_uc.py (training), sft/build_uc_dataset.py (tokenization),
+# gen/build_mixed_gen.py (the SI/EN mix) and sft/fetch_model.sh (model
+# download). Relative paths resolve against the repo root, not against this
+# file.
+#
+#   bash gen/run_gen_sft.sh                              # fetch, build, train
+#   python sft/run_sft_uc.py --config gen/config.yaml --preview 3
+#   python sft/run_sft_uc.py --config gen/config.yaml --set train.learning_rate=3e-5
+#
+# WHY THIS STAGE EXISTS
+# ---------------------
+# docs/uc-instruct-evaluation.md section 5: the stage-1 model answers *English*
+# prompts in Sinhala ("What is the capital of Sri Lanka?" ->
+# "ශ්‍රී ලංකාවේ අගනුවර කොළඹ."). Only 1.1% of assistant turns in the stage-1
+# corpus were majority-Latin, so it learned "reply in Sinhala" as an
+# unconditional rule. This stage trains on the `gen` split -- 255,974 dialogues
+# with prompt_ids disjoint from the `sft` split already seen -- and carries a
+# 25% English replay stream through it to undo that.
+#
+# Target hardware: one AMD MI300X VF (192 GB, ROCm). bf16 LoRA, no
+# bitsandbytes, sdpa attention. Same memory envelope as the stage-1 run; see
+# sft/config.yaml for the measured peak-VRAM breakdown at B=8.
+
+model:
+  # The merged stage-1 instruct model, not v02: this stage continues from it.
+  path: models/SinLlama_uc_instruct_cleaned
+  # NOTE: sft/config.yaml has `gs://sinllama-cpt/models/SinLlama_v02`, which is
+  # wrong twice over -- the bucket is the underscore form and there is no
+  # models/ prefix, everything sits at the bucket root. Verified correct:
+  gcs_uri: gs://sinllama_cpt/SinLlama_uc_instruct_cleaned
+  tokenizer_path: null            # null -> same as model.path
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  low_cpu_mem_usage: true
+
+data:
+  # Written by gen/build_mixed_gen.py; run it (or gen/run_gen_sft.sh) first.
+  train_file: data/gen_mixed/train_gen_mixed.parquet
+  # A MAPPING, not a string -- sft/run_sft_uc.py turns this into a dict of eval
+  # datasets, so every eval logs eval_si_loss and eval_en_loss separately. A
+  # single mixed eval_loss would hide the one thing this run exists to fix.
+  eval_file:
+    si: data/gen_mixed/eval_gen_si.parquet
+    en: data/gen_mixed/eval_gen_en.parquet
+  eval_samples: null              # the builder already sizes the slices
+  eval_seed: 42
+  # Token budget per dialogue, measured on gen with the trailing user turn
+  # dropped (SinLlama tokenizer, this template):
+  #   SI train_gen: mean 868, p90 1521, p95 1800, p99 2307
+  #   EN test_gen : mean 844, p90 1476, p95 1794, p99 2449
+  #   cap 2048 -> 97.5% / 97.2% of dialogues whole, 99.2% / 99.0% of tokens
+  # `gen` is much shorter than `sft` (868 vs 1211 mean), and SinLlama's
+  # extended vocab costs Sinhala about the same as English, so the 75:25
+  # dialogue ratio is also ~75:25 in tokens.
+  max_seq_length: 2048
+  cache_dir: data/gen_uc_cache    # separate from the stage-1 cache
+  preprocessing_num_workers: 8
+  max_train_samples: null         # e.g. 2000 for a smoke run
+  max_eval_samples: null
+
+# ---------------------------------------------------------------------------
+# The bilingual mix. Consumed only by gen/build_mixed_gen.py.
+#
+# Assignment rule: take the prompt_id intersection of the SI and EN files, sort
+# it lexicographically, then `idx % en_stride == 0` -> English, else Sinhala.
+# Exactly 1/en_stride English, fully deterministic, and each prompt_id lands in
+# exactly one language by construction -- so no dialogue is ever seen in both.
+#
+# This is why the rule keys on prompt_id and not on row index: only 1 of the
+# 28,300 shared ids sits at the same position in both files, so a literal
+# odd-row/even-row split over file order would overlap at random.
+# ---------------------------------------------------------------------------
+mix:
+  si_train: UltraChat_Sinhala/train_gen.parquet
+  si_eval: UltraChat_Sinhala/test_gen.parquet
+  # English train_gen is NOT in the repo -- gen/fetch_data.sh snapshots it from
+  # HuggingFaceH4/ultrachat_200k. Values are shell globs (train_gen ships as 3
+  # shards); a LIST is a fallback chain, first pattern that matches wins. The
+  # English test_gen is already committed, so eval works locally with no
+  # download at all -- which is what makes the whole builder testable off-pod.
+  en_train: UltraChat_Sinhala/english/hf/data/train_gen-*.parquet
+  en_eval:
+    - UltraChat_Sinhala/english/test_gen-*.parquet
+    - UltraChat_Sinhala/english/hf/data/test_gen-*.parquet
+  out_dir: data/gen_mixed
+  en_stride: 4                    # 1 in 4 -> exactly 25.0% English
+  # Eval slice sizes, held at the training ratio (1125:375 = 75:25) and at the
+  # same total as the stage-1 run's 1500, so eval cost is unchanged.
+  eval_si: 1125
+  eval_en: 375
+  seed: 42
+  # Sinhala carries JW300 machine-translation artifacts (30.2% of gen turns
+  # modified in a 16k-turn sample) and goes through sft/clean_ultrachat.py.
+  # English is the original UltraChat text and must NOT: the RULES are Sinhala
+  # regexes that would no-op, but TIDY's `[ \t]{2,} -> " "` collapses
+  # indentation and would corrupt English code blocks and markdown.
+  clean_sinhala: true
+
+# ---------------------------------------------------------------------------
+# Prompt template -- byte-identical to the stage-1 run. DO NOT EDIT.
+#
+# models/SinLlama_uc_instruct_cleaned already ships exactly this as its
+# tokenizer's chat_template; changing anything here would strand what stage 1
+# taught and change the cache fingerprint for no reason. The reasoning behind
+# the markers (Llama-3 role tokens are dead weights in this checkpoint) is in
+# sft/config.yaml and enforced by assert_template_tokens_usable().
+# ---------------------------------------------------------------------------
+template:
+  user_prefix: "### User:\n"
+  assistant_prefix: "### Assistant:\n"
+  turn_separator: "\n\n"
+  eos: "<|end_of_text|>"
+  system_prompt: ""
+  system_prefix: "### System:\n"
+  add_bos: true
+
+lora:                             # a FRESH adapter on the merged stage-1 model
+  rank: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  modules_to_save: []             # embeddings frozen; the template needs no untrained token
+  peft_path: null                 # null -> fresh adapter, which is the point of this stage
+
+train:
+  output_dir: gen/runs/gen_uc_lora
+  overwrite_output_dir: false     # false -> auto-resume from the last checkpoint
+  # ~256k dialogues / effective batch 64 = ~4,000 steps per epoch, ~222M tokens
+  # (73.6% of them supervised). At the stage-1 measured 7.9 s/step that is
+  # ~8-9 h per epoch; gen sequences are shorter, so expect a little faster.
+  num_train_epochs: 2             # was 3 in stage 1 -- this model is already tuned
+  learning_rate: 5.0e-5           # was 1e-4 -- halved, for the same reason
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  # Peak VRAM is set by per_device batch x sequence length. Measured in stage 1
+  # at B=8, seq 2048: ~131 GiB of 183 with Liger, ~176 without. Same shapes
+  # here, so the same batch size holds.
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 8  # effective batch 64 dialogues (~56k tokens/step)
+  bf16: true
+  gradient_checkpointing: false
+  group_by_length: true
+  seed: 42
+  logging_steps: 20
+  eval_steps: 300                 # ~13 evals per epoch
+  save_steps: 300                 # must be a multiple of eval_steps
+  save_total_limit: 3             # the best checkpoint is retained regardless
+  dataloader_num_workers: 4
+  ddp_timeout: 30000
+  compute_token_accuracy: true
+  # Liger's fused_linear_cross_entropy never materializes the
+  # B x 2048 x 139,336 logits tensor. Measured in stage 1: peak 163.0 -> 116.9
+  # GB, step time unchanged, train_loss identical to 4 decimals.
+  # Requires `pip install "liger-kernel==0.5.10"` (0.6.0+ needs transformers
+  # >= 4.52; this pipeline is pinned to 4.51.3).
+  use_liger_kernel: true
+  skip_memory_metrics: true
+  report_to: wandb
+  wandb_project: sinllama-sft-uc
+  run_name: sinllama-uc-gen-bilingual-r64
+
+early_stopping:
+  enabled: true
+  # eval_si_loss, NOT eval_en_loss and not a mixed loss. English starts from a
+  # near-zero baseline (the model has effectively never seen an English
+  # response), so its loss falls monotonically and says nothing about when to
+  # stop. The risk this run introduces is the other direction -- Sinhala
+  # degrading as English competes for LoRA capacity -- and eval_si_loss is what
+  # detects it. Watch eval_en_loss as the recovery curve.
+  metric: eval_si_loss
+  patience: 3                     # 3 x 300 = 900 steps without improvement
+  threshold: 0.0
