@@ -29,6 +29,13 @@ models:
     path: models/SinLlama_uc_instruct
   - name: SinLlama_uc_instruct_cleaned
     path: models/SinLlama_uc_instruct_cleaned
+  # Stage-2 SFT of uc_instruct_cleaned on the bilingual UltraChat `gen` mix
+  # (75% Sinhala / 25% English, disjoint prompt_ids from the sft split
+  # uc_instruct_cleaned already saw). See docs/gen-stage.md. Scored RAW like
+  # uc_instruct_cleaned above, for the same reason: raw is what keeps its
+  # number comparable across the v02 -> uc_instruct_cleaned -> this chain.
+  - name: SinLlama_UC_Gen_Model
+    path: models/SinLlama_UC_Gen_Model
 
 # Model-name substrings scored/finetuned in the Alpaca
 # "### Instruction / ### Input / ### Response" template instead of the
@@ -63,4 +70,8 @@ datasets:
 output_root: benchmark/results
 
 gcs:
-  bucket_root: gs://sinllama-cpt
+  # UNDERSCORE. gs://sinllama-cpt (hyphen) does not exist -- upload_to_gcs
+  # (lib/gcs_upload.sh) only warns on failure, so this typo silently dropped
+  # every benchmark upload until now; every other script in the repo (sft/,
+  # gen/, cpt/) already uses the correct underscore form.
+  bucket_root: gs://sinllama_cpt
