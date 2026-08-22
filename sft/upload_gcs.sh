@@ -22,9 +22,11 @@ CONFIG="${CONFIG:-${SCRIPT_DIR}/config.yaml}"
 BUCKET="${BUCKET:-gs://sinllama_cpt}"
 PYTHON="${PYTHON:-python3}"
 
-DATASET_NAME="UltraChat_Sinhala_cleaned"
-ADAPTER_NAME="SinLlama_uc_instruct_cleaned_adapters"
-MERGED_NAME="SinLlama_uc_instruct_cleaned"
+# Overridable so a later stage can reuse this script rather than fork it —
+# gen/upload_gcs.sh sets all three plus CONFIG. Defaults are the stage-1 names.
+DATASET_NAME="${DATASET_NAME:-UltraChat_Sinhala_cleaned}"
+ADAPTER_NAME="${ADAPTER_NAME:-SinLlama_uc_instruct_cleaned_adapters}"
+MERGED_NAME="${MERGED_NAME:-SinLlama_uc_instruct_cleaned}"
 
 MERGED_DIR="${MERGED_DIR:-${REPO_ROOT}/models/${MERGED_NAME}}"
 
