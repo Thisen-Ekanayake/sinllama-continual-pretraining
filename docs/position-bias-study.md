@@ -137,17 +137,71 @@ These were all silent-failure classes — wrong numbers, no error:
 - **gsutil discovery (`ce04a25`).** The Cloud SDK has been in a different place on every
   pod and is never on a non-interactive PATH; both scripts now search several locations.
 
+## Extension to all six checkpoints (2026-08-20)
+
+The original run above covered only `v02` and `uc_instruct_cleaned`. It was extended to
+all six SinLlama-line checkpoints (`llama-3-8b`, `SinLlama_v01`, `SinLlama_cpt`,
+`SinLlama_Bactrianx_Instruct`, `SinLlama_v02`, `SinLlama_uc_instruct_cleaned`) across
+both languages and both debiasing arms — 24 units total, all completed and uploaded to
+`gs://sinllama_cpt/debias_20260818/`. Full comparison: `python
+benchmark/mmlu/compare_debias.py --root benchmark/mmlu`. Headline numbers (permuted
+arm) are now in the appendix of `results_latest/MMLU_Debiased.pdf`.
+
+The core v02-vs-uc_instruct_cleaned finding is unchanged and, if anything,
+reinforced: across all pairwise comparisons in the six-model matrix, every
+`raw`-arm gap that was statistically significant stayed significant after
+permutation — position bias shifted magnitudes (by as much as ~6 pp for the
+most-biased checkpoints, `cpt`/`Bactrianx`) but did not flip any conclusion
+about which model is better.
+
+This run surfaced three problems unrelated to the debiasing method itself, worth
+recording since they cost real time on a shared, credit-limited pod:
+
+- **Naive parallel GPU dispatch is not safe on this stack without a real cooldown.**
+  A first attempt ran 3 models concurrently gated only by an instantaneous VRAM read
+  plus a 60 s settle window before allowing the next launch. Real ramp-up to peak
+  memory took 20+ minutes, not 60 s, so the dispatcher kept feeding new jobs into a
+  VRAM budget that hadn't actually cleared yet. A standalone watchdog (poll
+  `rocm-smi` every 20 s, kill the newest offending job if free VRAM drops below the
+  floor) caught the overshoots but then itself triggered a kill-relaunch-kill cascade,
+  because the dispatcher's launch gate had no memory of *why* the last slot opened up.
+  Net cost: one `cpt` permuted run lost ~55 minutes of progress (70-80% done) to a kill.
+  Fix applied: reverted to serial (`MAX_PARALLEL=1`) for the rest of the run. Parallel
+  dispatch should not be reattempted on this driver without adding an actual cooldown
+  period after every kill, not just after every launch.
+- **The pod was not dedicated.** `rocm-smi --showpids` (not `pgrep`, which only sees
+  this study's own process names) turned up a concurrent `finetune_whisper.py` job
+  consuming ~53.5 GB VRAM for 3+ hours, owned by a different user on the box. It
+  explained several VRAM-pressure readings that had otherwise looked like bugs in this
+  study's own jobs. Worth confirming with whoever provisions these pods whether shared
+  usage is expected.
+- **`evaluate_english_mmlu.py`'s batching has no attention-memory cap**, unlike
+  `permute_eval.py`'s `make_batches()` (B×S² budget, see above). Its calibrated-arm
+  jobs died deterministically at the same elapsed time on every retry — a single fixed
+  batch containing several long `professional_law`-style questions spiking memory by
+  ~50 GB in one 20 s window. Root-caused via the watchdog log's memory trajectory
+  (stable ~82 GB free for 90 s, then a sudden drop to ~32 GB just before the kill).
+  Worked around pragmatically by dropping its batch size from 16 to 4
+  (`EN_BS=4`), which was sufficient to get all three remaining calibrated runs through
+  cleanly. **Not fixed properly** — the evaluator should get the same B×S² cap
+  `permute_eval.py` has, instead of relying on a smaller fixed batch size that only
+  happens to be small enough for the worst prompt in this particular dataset.
+
 ## Known open items
 
 - The first SinhalaMMLU permutation attempt died with **SIGABRT and no Python
   traceback** ~714 s in. The rerun passed the same point with no change that plausibly
   mattered (longest prompt is 842 tokens, batches still 16), so it looks **transient
   rather than fixed**. The completed numbers are sound; recurrence is possible.
-- Only `v02` and `uc_instruct_cleaned` were debiased. `llama-3-8b`, `SinLlama_v01`,
-  `SinLlama_cpt` and `Bactrianx` still carry raw-only numbers, so cross-model comparisons
-  against the debiased pair are not like-for-like. `llama-3-8b` was already near-perfectly
-  calibrated (TVD 1.4 pp) and would gain little; `SinLlama_cpt` and `Bactrianx` were the
-  *most* biased (33.5 / 38.6 pp) and would gain most.
-- The `SinLlama_cpt` row in `MMLU_Benchmark.pdf` is still the sdpa-era figure
-  (35.65 / 40.13) rather than the eager re-eval (41.33 / 47.27). cpt is out of scope for
-  the paper but is still shown to the supervisor, so it should be corrected there.
+- `evaluate_english_mmlu.py` still lacks a B×S² batching cap (see above) — it works
+  today only because `EN_BS=4` happens to be small enough for the current dataset's
+  worst-case prompt length. A longer question set would reintroduce the same crash.
+- ~~The `SinLlama_cpt` row in `MMLU_Benchmark.pdf` is a stale sdpa-era figure~~ —
+  checked and this is wrong. `MMLU_Benchmark.pdf`'s cpt numbers (35.65% Sinhala /
+  40.13% English) were already generated after the eager-attention fix, and are
+  within 0.3–0.5 pp of this study's independent raw-arm re-run (35.32% / 39.62%,
+  eager, same protocol) — consistent with ordinary run-to-run/batching noise, not
+  the earlier SDPA bug. No correction needed. (An earlier draft of this doc
+  conflated that raw re-run with the *permuted* debiased arm, 39.56%/47.24%, which
+  is legitimately higher for a different reason — it removes position bias, not a
+  data bug — and does not belong in `MMLU_Benchmark.pdf`'s raw table.)
