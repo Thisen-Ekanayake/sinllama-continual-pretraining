@@ -95,6 +95,11 @@ class ModelArguments:
 class DataTrainingArguments:
     train_file: str = field(metadata={"help": "UltraChat-Sinhala train parquet."})
     eval_file: Optional[str] = field(default=None)
+    # Set instead of eval_file when data.eval_file in the YAML is a mapping
+    # {name: path}: a JSON blob, because HfArgumentParser cannot carry a dict
+    # through parse_dict. Trainer then scores each one separately and prefixes
+    # its metrics with the name -- eval_si_loss, eval_en_loss.
+    eval_files: Optional[str] = field(default=None)
     eval_samples: Optional[int] = field(default=None, metadata={"help": "Random slice of eval_file to score."})
     eval_seed: int = field(default=42)
     max_seq_length: int = field(default=2048)
@@ -169,7 +174,6 @@ def build_arguments(cfg: Dict[str, Any]):
         "attn_implementation": model_cfg.get("attn_implementation", "sdpa"),
         "low_cpu_mem_usage": model_cfg.get("low_cpu_mem_usage", True),
         "train_file": resolve_path(data_cfg["train_file"]),
-        "eval_file": resolve_path(data_cfg.get("eval_file")),
         "eval_samples": data_cfg.get("eval_samples"),
         "eval_seed": data_cfg.get("eval_seed", 42),
         "max_seq_length": data_cfg.get("max_seq_length", 2048),
@@ -179,6 +183,21 @@ def build_arguments(cfg: Dict[str, Any]):
         "max_eval_samples": data_cfg.get("max_eval_samples"),
         "overwrite_cache": data_cfg.get("overwrite_cache", False),
     }
+
+    # data.eval_file is either a path (one eval set, one eval_loss) or a mapping
+    # {name: path} (one eval set per name, each metric prefixed with the name).
+    # The mapping form exists so a bilingual run can watch eval_si_loss and
+    # eval_en_loss separately -- a single mixed loss would average away exactly
+    # the signal such a run is there to produce.
+    eval_cfg = data_cfg.get("eval_file")
+    if isinstance(eval_cfg, dict):
+        flat["eval_file"] = None
+        flat["eval_files"] = json.dumps(
+            {name: resolve_path(path) for name, path in eval_cfg.items()}
+        )
+    else:
+        flat["eval_file"] = resolve_path(eval_cfg)
+        flat["eval_files"] = None
 
     # LoRA
     flat["trainable"] = ",".join(lora_cfg.get("target_modules", []))
@@ -196,12 +215,23 @@ def build_arguments(cfg: Dict[str, Any]):
     flat.setdefault("logging_strategy", "steps")
     flat.setdefault("logging_first_step", True)
     flat["do_train"] = True
-    flat["do_eval"] = flat.get("eval_file") is not None
+    flat["do_eval"] = flat.get("eval_file") is not None or flat.get("eval_files") is not None
     flat["ddp_find_unused_parameters"] = False
 
     # Early stopping needs eval + checkpointing on the same cadence.
     if flat["do_eval"]:
         metric = es_cfg.get("metric", "eval_loss")
+        # With several eval sets there is no bare `eval_loss` to stop on, so the
+        # configured metric has to name one of them (e.g. eval_si_loss). Caught
+        # here rather than 300 steps in, where Trainer raises on a missing key.
+        if flat.get("eval_files"):
+            names = json.loads(flat["eval_files"]).keys()
+            if not any(metric.startswith(f"eval_{n}_") for n in names):
+                raise ValueError(
+                    f"early_stopping.metric is {metric!r}, but data.eval_file is a mapping over "
+                    f"{sorted(names)}, so metrics are prefixed per set. Use one of: "
+                    + ", ".join(f"eval_{n}_loss" for n in names)
+                )
         flat["eval_strategy"] = "steps"
         flat["save_strategy"] = "steps"
         flat["load_best_model_at_end"] = True
@@ -514,9 +544,9 @@ def main():
 
     eval_dataset = None
     if training_args.do_eval:
-        with training_args.main_process_first(desc="tokenizing eval split"):
-            eval_dataset = build_uc_dataset(
-                data_file=data_args.eval_file,
+        def _eval_split(path: str):
+            return build_uc_dataset(
+                data_file=path,
                 tokenizer=tokenizer,
                 template=template,
                 max_seq_length=data_args.max_seq_length,
@@ -527,7 +557,20 @@ def main():
                 subsample_seed=data_args.eval_seed,
                 overwrite_cache=data_args.overwrite_cache,
             )
-        logger.info(f"num eval samples: {len(eval_dataset)}")
+
+        with training_args.main_process_first(desc="tokenizing eval split"):
+            if data_args.eval_files:
+                eval_dataset = {
+                    name: _eval_split(path)
+                    for name, path in json.loads(data_args.eval_files).items()
+                }
+            else:
+                eval_dataset = _eval_split(data_args.eval_file)
+        if isinstance(eval_dataset, dict):
+            logger.info("num eval samples: "
+                        + ", ".join(f"{k}={len(v)}" for k, v in eval_dataset.items()))
+        else:
+            logger.info(f"num eval samples: {len(eval_dataset)}")
 
     # ---- model -----------------------------------------------------------
     config = AutoConfig.from_pretrained(model_args.model_name_or_path)
@@ -627,11 +670,19 @@ def main():
     if training_args.do_eval:
         logger.info("*** Evaluate (best checkpoint) ***")
         metrics = trainer.evaluate()
-        metrics["eval_samples"] = len(eval_dataset)
-        try:
-            metrics["perplexity"] = math.exp(metrics["eval_loss"])
-        except OverflowError:
-            metrics["perplexity"] = float("inf")
+        if isinstance(eval_dataset, dict):
+            for name, ds in eval_dataset.items():
+                metrics[f"eval_{name}_samples"] = len(ds)
+        else:
+            metrics["eval_samples"] = len(eval_dataset)
+        # One perplexity per eval set: with a mapping there is no bare
+        # `eval_loss` key, only eval_<name>_loss.
+        for key in [k for k in list(metrics) if k.endswith("_loss")]:
+            name = "perplexity" if key == "eval_loss" else f"{key[:-len('_loss')]}_perplexity"
+            try:
+                metrics[name] = math.exp(metrics[key])
+            except OverflowError:
+                metrics[name] = float("inf")
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
         state = trainer.state
