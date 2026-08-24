@@ -35,6 +35,7 @@ weights_analysis/new/weights_analysis/
 *.aux
 *.html
 *.out
+*.xml
 wiki_*
 
 !requirements.txt
