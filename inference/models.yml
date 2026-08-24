@@ -1,0 +1,29 @@
+# inference/models.yml
+# Model registry for ad-hoc generation-quality checks (inference/run_inference.py).
+# Same names and paths as benchmark/main.yml, so a model referred to here is the
+# same checkpoint the benchmark suite scores. Paths are relative to the repo
+# root unless absolute.
+#
+# Base / CPT checkpoints (llama-3-8b, SinLlama_v01, SinLlama_cpt, SinLlama_v02)
+# have no instruction-tuned prompt format and are completed raw. Instruct
+# checkpoints need the matching entry in inference/chat_template.jsonl;
+# run_inference.py resolves a model's `name` here against that file's `models`
+# lists automatically -- no per-model flag needed.
+
+models:
+  - name: llama-3-8b
+    path: models/llama-3-8b
+  - name: SinLlama_v01
+    path: models/SinLlama_v01
+  - name: SinLlama_cpt
+    path: models/SinLlama_cpt
+  - name: SinLlama_Bactrianx_Instruct
+    path: models/SinLlama_Bactrianx_Instruct
+  - name: SinLlama_v02
+    path: models/SinLlama_v02
+  - name: SinLlama_uc_instruct
+    path: models/SinLlama_uc_instruct
+  - name: SinLlama_uc_instruct_cleaned
+    path: models/SinLlama_uc_instruct_cleaned
+  - name: SinLlama_UC_Gen_Model
+    path: models/SinLlama_UC_Gen_Model
