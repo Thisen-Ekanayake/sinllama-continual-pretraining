@@ -3,8 +3,11 @@
 #
 #   bash inference/run.sh --model SinLlama_uc_instruct_cleaned
 #   bash inference/run.sh --model SinLlama_v02 --prompt "..." --preset creative
-#   bash inference/run.sh --model SinLlama_Bactrianx_Instruct --out results.txt
+#   bash inference/run.sh --out results.txt      # every model in models.yml
 #
+#   --model <name>     one model from inference/models.yml (default: run them
+#                       all, in registry order, skipping any whose checkpoint
+#                       is not on disk)
 #   --out <path.txt>   write generations to this file instead of the terminal
 #                       (default: print to the terminal)
 #

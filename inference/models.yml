@@ -9,6 +9,10 @@
 # checkpoints need the matching entry in inference/chat_template.jsonl;
 # run_inference.py resolves a model's `name` here against that file's `models`
 # lists automatically -- no per-model flag needed.
+#
+# run_inference.py with no --model runs every entry below in this order, and
+# skips any whose `path` holds no checkpoint, so entries may be listed here
+# before the weights exist locally.
 
 models:
   - name: llama-3-8b
