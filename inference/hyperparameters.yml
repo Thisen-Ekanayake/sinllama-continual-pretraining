@@ -1,0 +1,57 @@
+# inference/hyperparameters.yml
+# Generation knobs for inference/run_inference.py, grouped into named presets.
+# Pick one with `--preset <name>` (default: "default"). All fields map directly
+# onto transformers' GenerationConfig / model.generate() kwargs.
+#
+#   max_new_tokens        upper bound on generated length (not counting the prompt)
+#   do_sample             false = greedy/deterministic (temperature, top_p, top_k
+#                         are ignored); true = sample from the distribution
+#   temperature           lower = more deterministic, higher = more random
+#                         (only used when do_sample: true)
+#   top_p                 nucleus sampling: keep the smallest token set whose
+#                         cumulative probability >= top_p (only when do_sample)
+#   top_k                 keep only the top_k highest-probability tokens before
+#                         sampling (only when do_sample; 0 disables the filter)
+#   repetition_penalty    >1.0 discourages repeating already-generated tokens
+#                         (SinLlama's chat SFT models are prone to loops -- see
+#                         docs/uc-instruct-evaluation.md -- raise this first if
+#                         you see repetition)
+#   no_repeat_ngram_size  hard-block any n-gram of this size from repeating;
+#                         0 disables. A blunter version of repetition_penalty.
+
+presets:
+  default:
+    max_new_tokens: 256
+    do_sample: true
+    temperature: 0.7
+    top_p: 0.9
+    top_k: 50
+    repetition_penalty: 1.1
+    no_repeat_ngram_size: 0
+
+  greedy:                     # deterministic, for reproducible A/B comparisons
+    max_new_tokens: 256
+    do_sample: false
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 0
+    repetition_penalty: 1.1
+    no_repeat_ngram_size: 3
+
+  precise:                    # low-temperature sampling, for factual prompts
+    max_new_tokens: 256
+    do_sample: true
+    temperature: 0.3
+    top_p: 0.85
+    top_k: 40
+    repetition_penalty: 1.15
+    no_repeat_ngram_size: 3
+
+  creative:                   # higher entropy, for open-ended generation
+    max_new_tokens: 512
+    do_sample: true
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 0
+    repetition_penalty: 1.05
+    no_repeat_ngram_size: 0
