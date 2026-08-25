@@ -1,0 +1,142 @@
+# wikipedia_sft/config.yaml
+# Stage-3 SFT: SinLlama_uc_gen_bilingual ("uc_gen") on Sinhala Wikipedia.
+#
+# Read by sft/run_sft_uc.py (training), wikipedia_sft/build_wiki_sft_dataset.py
+# (the chat-template wrap) and sft/fetch_model.sh (model download). Relative
+# paths resolve against the repo root, not against this file.
+#
+#   bash wikipedia_sft/run_wiki_sft.sh                             # fetch, build, train
+#   python sft/run_sft_uc.py --config wikipedia_sft/config.yaml --preview 3
+#   python sft/run_sft_uc.py --config wikipedia_sft/config.yaml --set train.learning_rate=3e-5
+#
+# WHY THIS STAGE EXISTS
+# ---------------------
+# Stages 1-2 (sft/, gen/) taught instruction-following and bilingual reply
+# behavior from UltraChat dialogues, which carry comparatively little Sinhala
+# encyclopedic/factual content. This stage injects that directly: Sinhala
+# Wikipedia articles (150-2000 words, see wikipedia_sft/fetch_wikipedia_dump.sh)
+# wrapped as single-turn "tell me about X" / "X's answer" pairs in the same
+# template stages 1-2 already trained -- see sft/prompt_template.txt and
+# wikipedia_sft/build_wiki_sft_dataset.py for the wrap. The small LoRA rank
+# below is deliberate: this stage should add facts, not overwrite the
+# instruct/bilingual behavior already trained into the adapters it follows.
+#
+# Target hardware: one AMD MI300X (192 GB, ROCm). bf16 LoRA, no bitsandbytes,
+# sdpa attention, no gradient checkpointing -- same envelope as sft/ and gen/,
+# and lighter here since rank 8 carries far less optimizer state than rank 64.
+
+model:
+  # The merged stage-2 bilingual model ("uc_gen"), not the stage-1 or base
+  # checkpoint: this stage continues from it. Bucket root, no models/ prefix,
+  # same convention as sft/gen's gcs_uri values.
+  path: models/SinLlama_UC_Gen_Model
+  gcs_uri: gs://sinllama_cpt/SinLlama_UC_Gen_Model
+  tokenizer_path: null            # null -> same as model.path
+  torch_dtype: bfloat16
+  attn_implementation: sdpa       # sdpa | eager | flash_attention_2
+  low_cpu_mem_usage: true
+
+data:
+  # Written by wikipedia_sft/build_wiki_sft_dataset.py; run it (or
+  # wikipedia_sft/run_wiki_sft.sh) first.
+  train_file: wikipedia_sft/data/wiki_sft/train_wiki.parquet
+  eval_file: wikipedia_sft/data/wiki_sft/eval_wiki.parquet
+  eval_samples: null              # the builder already sizes the eval slice
+  eval_seed: 42
+  # Token budget per article (SinLlama tokenizer, short+medium buckets only):
+  # mean 855, p90 1868, p95 2354, p99 3079, max 9811 -- 2048 covers ~92% of
+  # articles whole. The trainer truncates an overflowing single-turn example
+  # at the token cap with its EOS left out of the window rather than teaching
+  # a mid-sentence stop (see sft/run_sft_uc.py's build_uc_dataset docstring),
+  # so the remaining ~8% just lose their terminal EOS supervision, not the run.
+  max_seq_length: 2048
+  cache_dir: wikipedia_sft/data/wiki_sft_cache   # separate from the sft/gen caches
+  preprocessing_num_workers: 8
+  max_train_samples: null         # e.g. 2000 for a smoke run
+  max_eval_samples: null
+
+# ---------------------------------------------------------------------------
+# Source articles for the chat-template wrap. Consumed only by
+# wikipedia_sft/build_wiki_sft_dataset.py -- run_sft_uc.py never reads this
+# section (same pattern as gen/config.yaml's `mix:`).
+# ---------------------------------------------------------------------------
+wiki_source:
+  articles:
+    - Wikipedia_Dataset/short_articles.json    # 150-500 words
+    - Wikipedia_Dataset/medium_articles.json   # 500-2000 words
+  # Stubs (<150 words) carry too little signal; long articles (>2000 words)
+  # mostly overflow max_seq_length. Produced by
+  # wikipedia_sft/fetch_wikipedia_dump.sh, identical boundaries to
+  # Wikipedia_Dataset/categorize_articles.py.
+  out_dir: wikipedia_sft/data/wiki_sft
+  eval_articles: 500               # ~500 of ~10,900 articles (~4.6%) -- eval_loss stability
+                                    # matters more here than in sft/gen, whose corpora are 20x larger
+  seed: 42
+
+# ---------------------------------------------------------------------------
+# Prompt template -- byte-identical to sft/ and gen/. DO NOT EDIT.
+#
+# models/SinLlama_uc_gen_bilingual already ships exactly this as its
+# tokenizer's chat_template; changing anything here would strand what stages
+# 1-2 taught and change the cache fingerprint for no reason. The reasoning
+# behind the markers (Llama-3 role tokens are dead weights in this checkpoint)
+# is in sft/config.yaml and enforced by assert_template_tokens_usable().
+# ---------------------------------------------------------------------------
+template:
+  user_prefix: "### User:\n"
+  assistant_prefix: "### Assistant:\n"
+  turn_separator: "\n\n"
+  eos: "<|end_of_text|>"
+  system_prompt: ""
+  system_prefix: "### System:\n"
+  add_bos: true
+
+lora:                             # a FRESH adapter on the merged stage-2 model
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  modules_to_save: []             # embeddings frozen; the template needs no untrained token
+  peft_path: null                 # null -> fresh adapter, which is the point of this stage
+
+train:
+  output_dir: wikipedia_sft/runs/wiki_sft_lora
+  overwrite_output_dir: false     # false -> auto-resume from the last checkpoint
+  # ~10,400 train articles / effective batch 64 = ~163 steps/epoch. Much
+  # smaller than sft/ or gen/, so this run is fast; early stopping still picks
+  # the real endpoint rather than relying on the cap.
+  num_train_epochs: 3
+  learning_rate: 5.0e-5
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  # Peak VRAM is set by per_device batch x sequence length, not by rank -- but
+  # rank 8 carries far less optimizer/gradient state than the rank-64 recipe
+  # sft/gen measured at ~131 GiB/183 (B=8, Liger on), so this run has
+  # comfortable headroom at the same batch size.
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 8  # effective batch 64 articles
+  bf16: true
+  gradient_checkpointing: false
+  group_by_length: true
+  seed: 42
+  logging_steps: 10
+  eval_steps: 50                  # ~3 evals/epoch on this much smaller corpus
+  save_steps: 50                  # must be a multiple of eval_steps
+  save_total_limit: 3             # the best checkpoint is retained regardless
+  dataloader_num_workers: 4
+  ddp_timeout: 30000
+  compute_token_accuracy: true
+  use_liger_kernel: true          # requires `pip install "liger-kernel==0.5.10"`
+  skip_memory_metrics: true
+  report_to: wandb
+  wandb_project: sinllama-sft-uc
+  run_name: sinllama-uc-wiki-r8
+
+early_stopping:
+  enabled: true
+  metric: eval_loss                # single eval set -- unlike gen/, no bilingual split to watch separately
+  patience: 5                      # 5 x 50 = 250 steps without improvement (~1.5 epochs)
+  threshold: 0.0
