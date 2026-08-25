@@ -93,13 +93,21 @@ else
   # tool's argparse -- verified against the vendored copy's WikiExtractor.py
   # (__version__ 3.0.8) and confirmed identical on PyPI 3.1.0: extract.sh
   # itself does not run as written. Only the flags below are recognized.
+  #
+  # NO --links, deliberately. It keeps wiki links as <a href="...">text</a>,
+  # and with --html-safe (on by default) those arrive HTML-ESCAPED as
+  # `&lt;a href="%E0%B7%81..."&gt;`. The first SinLlama_wiki run shipped with
+  # --links and put that markup in 67.1% of training rows (7,101 of 10,587);
+  # the trained model then reproduced it verbatim in Sinhala generation. The
+  # reference corpus this script is meant to reproduce
+  # (Wikipedia_Dataset/extracted_json) has 0% of it. Article text keeps the
+  # anchor's visible text either way -- only the markup goes.
   "${RUN_EXTRACTOR[@]}" "${DUMP_XML}" \
       --json \
       --processes "${PROCESSES}" \
       --templates "${WIKI_DIR}/templates.txt" \
       --output "${EXTRACTED_DIR}" \
-      --bytes 1M \
-      --links
+      --bytes 1M
 fi
 
 # -- 4. NDJSON -> indented JSON array -----------------------------------------

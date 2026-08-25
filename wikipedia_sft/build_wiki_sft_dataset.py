@@ -78,6 +78,22 @@ _BLANK_PARENS = re.compile(r"\(\s*\)")
 _BLANK_LINES = re.compile(r"\n{3,}")
 _TRAILING_WS = re.compile(r"[ \t]+\n")
 
+# Wiki link markup, keeping the anchor's visible text and dropping the tag.
+# fetch_wikipedia_dump.sh no longer passes --links, so freshly extracted text
+# has none of this -- but an `extracted/` tree produced by an older run (or by
+# Wikipedia_Dataset/wikiextractor/extract.sh) still does, and it is what put
+# `&lt;a href="%E0%B7%81..."&gt;` into 67.1% of the first SinLlama_wiki run's
+# training rows. Both spellings are handled: --html-safe (on by default)
+# escapes the tags, a run with it off leaves them literal.
+# The opening tag is "anything up to the closing bracket" rather than href
+# alone: external links carry extra attributes (rel="mw:ExtLink" title="...").
+_ANCHOR_ESC = re.compile(r"&lt;a\s(?:(?!&gt;).)*?&gt;(.*?)&lt;/a&gt;", re.S)
+_ANCHOR_RAW = re.compile(r"<a\s[^>]*>(.*?)</a>", re.S)
+# An article truncated mid-link leaves an unpaired tag the rules above cannot
+# match; drop those outright so no markup survives into a training example.
+_ANCHOR_ORPHAN = re.compile(
+    r"&lt;/?a(?:\s(?:(?!&gt;).)*?)?(?:&gt;|$)|</?a(?:\s[^>]*)?>", re.S)
+
 
 def resolve(path: str) -> Path:
     p = Path(path).expanduser()
@@ -87,10 +103,14 @@ def resolve(path: str) -> Path:
 def normalize_text(text: str) -> str:
     """Light cleanup of WikiExtractor's plain-text output.
 
-    Template stripping (e.g. a name's untranslated English form) sometimes
-    leaves an empty "()"; extraction otherwise leaves the text alone, so this
-    is whitespace + empty-parens only, not a rewrite.
+    Strips wiki link markup down to its visible text (see _ANCHOR_ESC), then
+    tidies whitespace. Template stripping (e.g. a name's untranslated English
+    form) sometimes leaves an empty "()", which also goes. Nothing else is
+    rewritten.
     """
+    text = _ANCHOR_ESC.sub(r"\1", text)
+    text = _ANCHOR_RAW.sub(r"\1", text)
+    text = _ANCHOR_ORPHAN.sub("", text)
     text = _BLANK_PARENS.sub("", text)
     text = _TRAILING_WS.sub("\n", text)
     text = _BLANK_LINES.sub("\n\n", text)
