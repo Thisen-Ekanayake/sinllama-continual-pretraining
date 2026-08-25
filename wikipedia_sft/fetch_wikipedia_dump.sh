@@ -13,8 +13,10 @@
 #   WIKI_DIR=/other/path bash wikipedia_sft/fetch_wikipedia_dump.sh
 #
 # Pipeline (mirrors the one already baked into Wikipedia_Dataset/, per
-# Wikipedia_Dataset/wikiextractor/extract.sh, categorize_articles.py and
-# split_by_category.py):
+# categorize_articles.py and split_by_category.py -- NOT per
+# Wikipedia_Dataset/wikiextractor/extract.sh, whose --sections/--lists/
+# --keep_tables/--min_text_length/--filter_disambig_pages flags do not exist
+# in this tool's argparse and were never actually runnable as written):
 #
 #   1. download   siwiki-latest-pages-articles.xml.bz2 from dumps.wikimedia.org
 #   2. decompress -> siwiki-latest-pages-articles.xml
@@ -86,18 +88,18 @@ else
 
   rm -rf "${EXTRACTED_DIR}"
   log "running WikiExtractor (processes=${PROCESSES}) -> ${EXTRACTED_DIR}"
+  # --sections/--lists/--keep_tables/--min_text_length/--filter_disambig_pages
+  # (from Wikipedia_Dataset/wikiextractor/extract.sh) do not exist in this
+  # tool's argparse -- verified against the vendored copy's WikiExtractor.py
+  # (__version__ 3.0.8) and confirmed identical on PyPI 3.1.0: extract.sh
+  # itself does not run as written. Only the flags below are recognized.
   "${RUN_EXTRACTOR[@]}" "${DUMP_XML}" \
       --json \
       --processes "${PROCESSES}" \
       --templates "${WIKI_DIR}/templates.txt" \
       --output "${EXTRACTED_DIR}" \
       --bytes 1M \
-      --links \
-      --sections \
-      --lists \
-      --keep_tables \
-      --min_text_length 0 \
-      --filter_disambig_pages
+      --links
 fi
 
 # -- 4. NDJSON -> indented JSON array -----------------------------------------
