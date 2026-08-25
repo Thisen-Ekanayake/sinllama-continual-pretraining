@@ -41,15 +41,20 @@
 #     which conflicts with the 4.51.3 pin below.
 #
 # Install order matters: torch/torchvision must come from AMD's ROCm wheel
-# index, not plain PyPI -- `pip install -r` alone resolves a CUDA build.
-#   pip install torch==2.11.0 torchvision==0.26.0 \
-#       --index-url https://download.pytorch.org/whl/rocm<X.Y>
+# index, not plain PyPI -- `pip install -r` alone resolves a CUDA build and
+# fails at runtime with "Found no NVIDIA driver on your system" the moment
+# transformers touches torch.cuda.mem_get_info, even though the box is an AMD
+# GPU throughout (ROCm's HIP backend is exposed under the torch.cuda.*
+# namespace for compatibility, so that call is normal -- the CUDA-only build
+# underneath it is the actual bug). Confirmed working index: PyTorch publishes
+# ROCm wheels under the "rocm6.2" folder name even though it runs against this
+# pod's ROCm 7.x userspace (rocm-7-14-... hostname) -- the wheel is "the ROCm
+# 6.2 build, compatible with ROCm 7.0", not a mismatch.
+#   pip install torch==2.11.0 torchvision==0.26.0 torchaudio \
+#       --index-url https://download.pytorch.org/whl/rocm6.2
 #   pip install -r requirements_amd.txt
-# <X.Y> is whatever ROCm userspace ships on the pod. The pod that measured
-# 2.11.0+rocm7.13 was destroyed on 2026-08-17 with no other record of the
-# exact wheel index it used (see memory "MI300X pod destroyed") -- confirm
-# the index folder against `rocminfo` / the new pod's ROCm version rather
-# than assuming "rocm7.13" is the literal folder name.
+# If a fresh pod's ROCm index ever moves past 6.2, swap the folder name only
+# -- the rest of this file is unaffected.
 torch==2.11.0
 torchvision==0.26.0
 
