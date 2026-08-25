@@ -36,6 +36,13 @@ models:
   # number comparable across the v02 -> uc_instruct_cleaned -> this chain.
   - name: SinLlama_UC_Gen_Model
     path: models/SinLlama_UC_Gen_Model
+  # Stage-3 SFT of SinLlama_UC_Gen_Model on Sinhala Wikipedia (short+medium
+  # articles wrapped as single-turn "tell me about X" pairs in the same
+  # UltraChat template, LoRA r8/alpha16/lr5e-5). See wikipedia_sft/config.yaml.
+  # Scored RAW like the two models above, for the same reason: raw is what keeps
+  # its number comparable across the v02 -> uc_instruct_cleaned -> gen -> this chain.
+  - name: SinLlama_wiki
+    path: models/SinLlama_wiki
 
 # Model-name substrings scored/finetuned in the Alpaca
 # "### Instruction / ### Input / ### Response" template instead of the

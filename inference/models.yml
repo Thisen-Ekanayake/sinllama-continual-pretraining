@@ -31,3 +31,5 @@ models:
     path: models/SinLlama_uc_instruct_cleaned
   - name: SinLlama_UC_Gen_Model
     path: models/SinLlama_UC_Gen_Model
+  - name: SinLlama_wiki
+    path: models/SinLlama_wiki
