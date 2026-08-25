@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import random
 import re
@@ -78,21 +79,67 @@ _BLANK_PARENS = re.compile(r"\(\s*\)")
 _BLANK_LINES = re.compile(r"\n{3,}")
 _TRAILING_WS = re.compile(r"[ \t]+\n")
 
-# Wiki link markup, keeping the anchor's visible text and dropping the tag.
+# --------------------------------------------------------------------------
+# Extraction artifacts.
+#
 # fetch_wikipedia_dump.sh no longer passes --links, so freshly extracted text
-# has none of this -- but an `extracted/` tree produced by an older run (or by
-# Wikipedia_Dataset/wikiextractor/extract.sh) still does, and it is what put
-# `&lt;a href="%E0%B7%81..."&gt;` into 67.1% of the first SinLlama_wiki run's
-# training rows. Both spellings are handled: --html-safe (on by default)
-# escapes the tags, a run with it off leaves them literal.
-# The opening tag is "anything up to the closing bracket" rather than href
-# alone: external links carry extra attributes (rel="mw:ExtLink" title="...").
-_ANCHOR_ESC = re.compile(r"&lt;a\s(?:(?!&gt;).)*?&gt;(.*?)&lt;/a&gt;", re.S)
-_ANCHOR_RAW = re.compile(r"<a\s[^>]*>(.*?)</a>", re.S)
-# An article truncated mid-link leaves an unpaired tag the rules above cannot
-# match; drop those outright so no markup survives into a training example.
-_ANCHOR_ORPHAN = re.compile(
-    r"&lt;/?a(?:\s(?:(?!&gt;).)*?)?(?:&gt;|$)|</?a(?:\s[^>]*)?>", re.S)
+# carries none of the anchor markup -- but an `extracted/` tree from an older
+# run (or from Wikipedia_Dataset/wikiextractor/extract.sh) does, and that is
+# what put `&lt;a href="%E0%B7%81..."&gt;` into 67.1% of the first
+# SinLlama_wiki run's training rows. Everything below is therefore written to
+# clean an already-extracted tree as well as a fresh one.
+#
+# Tags are stripped BY NAME, never by a generic `<\w+>` rule. An audit of the
+# corpus found `fml`, `act`, `hdmv`, `vhml`, `person`, `snoj` and friends in
+# articles *about* markup languages, where the tags are the subject matter and
+# must survive. Only tags that are genuinely MediaWiki/HTML furniture are
+# listed. Paired forms keep their inner text; void/orphan forms are dropped.
+# --------------------------------------------------------------------------
+_STRIP_TAGS = (
+    "a", "b", "i", "u", "s", "br", "hr", "p", "em", "strong", "span", "div",
+    "sup", "sub", "small", "big", "code", "pre", "tt", "font", "center",
+    "blockquote", "poem", "nowiki", "math", "chem", "ul", "ol", "li", "dl",
+    "dt", "dd", "table", "tr", "td", "th", "caption", "ref", "references",
+    "gallery", "score", "mapframe", "templatestyles", "link", "onlyinclude",
+    "includeonly", "noinclude", "timeline", "imagemap", "syntaxhighlight",
+)
+_TAG_ALT = "|".join(_STRIP_TAGS)
+# Escaped (WikiExtractor's --html-safe default) and raw spellings of each.
+_TAG_PAIRED_ESC = re.compile(
+    rf"&lt;({_TAG_ALT})\b(?:(?!&gt;).)*?&gt;(.*?)&lt;/\1&gt;", re.S | re.I)
+_TAG_PAIRED_RAW = re.compile(
+    rf"<({_TAG_ALT})\b[^>]*>(.*?)</\1>", re.S | re.I)
+# Unpaired: void tags, and tags left dangling by an article truncated mid-link.
+_TAG_ORPHAN_ESC = re.compile(
+    rf"&lt;/?(?:{_TAG_ALT})\b(?:(?!&gt;).)*?(?:&gt;|$)", re.S | re.I)
+_TAG_ORPHAN_RAW = re.compile(rf"</?(?:{_TAG_ALT})\b[^>]*>", re.S | re.I)
+
+# Wiki markup that survives extraction in a small tail of articles.
+_WIKILINK_PIPED = re.compile(r"\[\[[^\]|]*\|([^\]]*)\]\]")   # [[Target|shown]] -> shown
+_WIKILINK_PLAIN = re.compile(r"\[\[([^\]|]*)\]\]")           # [[shown]]        -> shown
+# Innermost {{...}} only; applied repeatedly so nested infobox templates
+# ({{#if:|{{legend0|{{IIJ/P/TC }}...}}}}) unwind from the inside out. A single
+# non-nested pass leaves the outer braces and their pipe-delimited parameter
+# lines behind, which is what survived the first cleaning attempt in ~6 country
+# articles.
+_TEMPLATE_INNER = re.compile(r"\{\{[^{}]*\}\}")
+# Whatever the unwind cannot balance: stray braces, and the parameter lines of
+# a half-expanded infobox (" |capital | =", "| Belfast", "{| class=...").
+_BRACE_ORPHAN = re.compile(r"\{\{|\}\}|\{\||\|\}")
+_TABLE_LINE = re.compile(r"^\s*(?:\||!|\{\||\|\}).*$", re.M)
+_WIKI_QUOTES = re.compile(r"'{2,5}")                         # ''italic''/'''bold'''
+# Footnote/reference leftovers: "[1]", "[12]" — never legitimate Sinhala prose.
+_FOOTNOTE = re.compile(r"\[\d{1,3}\]")
+# Bare external URLs, overwhelmingly in "මූලාශ්‍ර." (sources) sections. Dropped
+# rather than kept: an SFT target that recites youtube.com/watch?v=... teaches
+# the model to emit URLs, which is exactly what this stage should not do.
+# `\S*` not `\S+`, and a tolerated space after the scheme: the corpus contains
+# "http:// www.google.com", which `\S+` cannot match at all.
+_BARE_URL = re.compile(r"https?:\s*//\s*\S*")
+# Percent-encoded Sinhala left behind by a link whose tag was already stripped.
+_URL_ENCODED = re.compile(r"(?:%[0-9A-Fa-f]{2}){3,}[-\w%]*")
+# A leaked table-of-contents header at the very start of an article body.
+_TOC_HEAD = re.compile(r"\A\s*අන්තර්ගතය\s*\.\s*\n")
 
 
 def resolve(path: str) -> Path:
@@ -101,16 +148,61 @@ def resolve(path: str) -> Path:
 
 
 def normalize_text(text: str) -> str:
-    """Light cleanup of WikiExtractor's plain-text output.
+    """Strip extraction artifacts from WikiExtractor's plain-text output.
 
-    Strips wiki link markup down to its visible text (see _ANCHOR_ESC), then
-    tidies whitespace. Template stripping (e.g. a name's untranslated English
-    form) sometimes leaves an empty "()", which also goes. Nothing else is
-    rewritten.
+    Order matters. Tags are removed while still escaped, because unescaping
+    first would turn a literal `&lt;fml&gt;` code sample in an article *about*
+    a markup language into something a tag rule could eat. Only the tag names
+    in _STRIP_TAGS are touched, so those samples survive either way.
+
+    Measured on the 11,087-article short+medium corpus (2026-08-25): anchors in
+    67.0% of articles, URL-encoded runs in 62.6%, bare URLs in 6.0%, empty
+    parens 3.6%, footnote markers 1.5%, HTML entities 1.6%, and a long tail of
+    wiki markup, tables and refs under 1% each.
     """
-    text = _ANCHOR_ESC.sub(r"\1", text)
-    text = _ANCHOR_RAW.sub(r"\1", text)
-    text = _ANCHOR_ORPHAN.sub("", text)
+    # 1. Markup tags, escaped form first, then any raw survivors.
+    for _ in range(2):  # nested pairs, e.g. an <a> inside a <ref>
+        text = _TAG_PAIRED_ESC.sub(r"\2", text)
+        text = _TAG_PAIRED_RAW.sub(r"\2", text)
+    text = _TAG_ORPHAN_ESC.sub("", text)
+    text = _TAG_ORPHAN_RAW.sub("", text)
+
+    # 2. Entities. After tag removal, what is left is content: &amp; -> &, and
+    #    a code sample's &lt;fml&gt; back to its intended <fml>. Looped because
+    #    parts of the corpus are double-escaped ("S&amp;amp;P"), which one pass
+    #    leaves as a visible "&amp;".
+    for _ in range(3):
+        unescaped = html.unescape(text)
+        if unescaped == text:
+            break
+        text = unescaped
+    # Unescaping can expose a tag that was double-escaped in the source.
+    text = _TAG_PAIRED_RAW.sub(r"\2", text)
+    text = _TAG_ORPHAN_RAW.sub("", text)
+
+    # 3. Wiki markup that survived extraction.
+    text = _WIKILINK_PIPED.sub(r"\1", text)
+    text = _WIKILINK_PLAIN.sub(r"\1", text)
+    for _ in range(6):  # unwind nested templates from the inside out
+        collapsed = _TEMPLATE_INNER.sub("", text)
+        if collapsed == text:
+            break
+        text = collapsed
+    text = _TABLE_LINE.sub("", text)
+    # Removing an unbalanced "{{" can leave its parameter line ("|name=...")
+    # starting the line, which the pass above has already gone by -- so sweep
+    # table lines once more afterwards.
+    text = _BRACE_ORPHAN.sub("", text)
+    text = _TABLE_LINE.sub("", text)
+    text = _WIKI_QUOTES.sub("", text)
+
+    # 4. Reference furniture and bare links.
+    text = _FOOTNOTE.sub("", text)
+    text = _BARE_URL.sub("", text)
+    text = _URL_ENCODED.sub("", text)
+    text = _TOC_HEAD.sub("", text)
+
+    # 5. Whitespace and the empty "()" left by template stripping.
     text = _BLANK_PARENS.sub("", text)
     text = _TRAILING_WS.sub("\n", text)
     text = _BLANK_LINES.sub("\n\n", text)
@@ -135,10 +227,18 @@ def load_articles(paths: list[Path]) -> list[dict[str, Any]]:
     return list(articles.values())
 
 
+# Articles this short after cleaning were mostly link lists or infobox shells:
+# the prose that remains is a single sentence, which is a poor SFT target for a
+# "tell me about X" prompt. Measured at 200: 2 of 11,087 articles drop out.
+MIN_CHARS = 200
+
+
 def build_row(article: dict[str, Any]) -> dict[str, Any] | None:
     title = (article.get("title") or "").strip()
     text = normalize_text(article.get("text") or "")
     if not title or not text:
+        return None
+    if len(text) < MIN_CHARS:
         return None
     prompt = prompt_for(article["id"])
     return {
@@ -192,7 +292,8 @@ def main() -> int:
     by_category: dict[str, int] = {}
     for r in rows:
         by_category[r["category"]] = by_category.get(r["category"], 0) + 1
-    print(f"kept {len(rows):,} / {len(raw):,} articles ({dropped} dropped: missing title or text)")
+    print(f"kept {len(rows):,} / {len(raw):,} articles "
+          f"({dropped} dropped: no title, or under {MIN_CHARS} chars once cleaned)")
     for cat, n in sorted(by_category.items(), key=lambda kv: -kv[1]):
         print(f"  {cat}: {n:,}")
 
@@ -208,8 +309,14 @@ def main() -> int:
     train_table = pa.Table.from_pylist(train_rows, schema=OUT_SCHEMA)
     eval_table = pa.Table.from_pylist(eval_rows, schema=OUT_SCHEMA)
 
-    train_path = out_dir / "train_wiki.parquet"
-    eval_path = out_dir / "eval_wiki.parquet"
+    # `_clean` in the name, not an in-place overwrite of train_wiki.parquet.
+    # sft/build_uc_dataset.py keys its tokenized-dataset cache on
+    # `{filename_stem}_{template_fingerprint}_len{max_seq}`, so reusing the old
+    # filename after changing the text would silently reload the stale tokens
+    # built from the markup-laden corpus and train on them again. Same reason
+    # sft/clean_ultrachat.py writes *_clean.parquet.
+    train_path = out_dir / "train_wiki_clean.parquet"
+    eval_path = out_dir / "eval_wiki_clean.parquet"
     write(train_table, train_path, args.dry_run)
     write(eval_table, eval_path, args.dry_run)
     print(f"\n-> {train_path if not args.dry_run else '(dry run)'}: {train_table.num_rows:,} rows")
