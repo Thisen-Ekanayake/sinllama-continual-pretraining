@@ -39,6 +39,7 @@ weights_analysis/new/weights_analysis/
 wiki_*
 
 !requirements.txt
+!requirements_amd.txt
 # docs/ is prose we actually want tracked, despite the blanket *.md above.
 !docs/*.md
 # small hand-authored config, not data, despite the blanket *.jsonl above.
