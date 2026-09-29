@@ -43,6 +43,12 @@ models:
   # its number comparable across the v02 -> uc_instruct_cleaned -> gen -> this chain.
   - name: SinLlama_wiki
     path: models/SinLlama_wiki
+  # SinLlama_wiki retrained from the same parent on the de-artifacted corpus
+  # (wikipedia_sft commit f2b9731): best-eval-loss adapter from
+  # gs://sinllama_cpt/sinllama_wiki_cleaned_adapters/wiki_sft_lora_clean,
+  # merged onto SinLlama_UC_Gen_Model. Scored RAW, same as SinLlama_wiki.
+  - name: SinLlama_wiki_clean
+    path: models/SinLlama_wiki_clean
 
 # Model-name substrings scored/finetuned in the Alpaca
 # "### Instruction / ### Input / ### Response" template instead of the
