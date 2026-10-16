@@ -1,0 +1,127 @@
+# wikipedia_sft/config_v2.yaml
+# Stage-3 SFT v2: SinLlama_UC_Gen_Model on length-matched Sinhala Wikipedia
+# answers + ~50% Sinhala UltraChat replay.
+#
+#   python wikipedia_sft/build_wiki_mix_dataset.py --config wikipedia_sft/config_v2.yaml
+#   CONFIG=wikipedia_sft/config_v2.yaml SKIP_FETCH=1 SKIP_BUILD=1 bash wikipedia_sft/run_wiki_sft.sh
+#
+# WHY A V2
+# --------
+# v1 (config.yaml -> SinLlama_wiki_clean) answered every "tell me about X"
+# prompt with the whole article and trained ~8 epochs on Wikipedia alone. On
+# the 100-prompt Gemini-judged probe it scored 3.61 overall vs 5.11 for its
+# parent UC_Gen (conciseness 3.45 vs 5.81) -- see
+# inference/judge_comparison_UC_Gen_vs_wiki_clean.txt. v2 changes the data, not
+# the trainer:
+#   - answer length matches the question (lead / 2-3 sentences / capped detail)
+#   - weak articles filtered (non-Sinhala, list/table-like, run-on text)
+#   - ~50% Sinhala UltraChat replay so instruction-following stays in training
+#   - early stopping on eval_wiki_loss (6-epoch cap), not a fixed ~8 epochs
+# Details in wikipedia_sft/build_wiki_mix_dataset.py.
+#
+# Hardware: one 32-48 GB NVIDIA GPU (A40, RTX PRO 4500). bf16 LoRA r8, sdpa,
+# gradient checkpointing on; ~22 GB at batch 4 x 2048 (the MI300X recipe's
+# batch 8 x 2048 without checkpointing does not fit). Checkpoints go to the
+# RunPod network volume so a pod that dies (e.g. out of credits) loses at most
+# save_steps of work; rerunning the same command resumes from the last one.
+
+model:
+  path: models/SinLlama_UC_Gen_Model
+  gcs_uri: gs://sinllama_cpt/SinLlama_UC_Gen_Model
+  tokenizer_path: null
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  low_cpu_mem_usage: true
+
+data:
+  train_file: wikipedia_sft/data/wiki_mix/train_mix.parquet
+  # Two eval sets -> eval_wiki_loss and eval_uc_loss, so a drop in
+  # instruction-following data fit shows up next to the Wikipedia fit.
+  eval_file:
+    wiki: wikipedia_sft/data/wiki_mix/eval_wiki.parquet
+    uc: wikipedia_sft/data/wiki_mix/eval_uc.parquet
+  eval_samples: null
+  eval_seed: 42
+  max_seq_length: 2048
+  cache_dir: wikipedia_sft/data/wiki_mix_cache
+  preprocessing_num_workers: 8
+  max_train_samples: null
+  max_eval_samples: null
+
+# Consumed only by wikipedia_sft/build_wiki_mix_dataset.py.
+wiki_mix:
+  articles:
+    - Wikipedia_Dataset/short_articles.json    # 150-500 words
+    - Wikipedia_Dataset/medium_articles.json   # 500-2000 words
+  ultrachat_train: UltraChat_Sinhala/train_gen.parquet   # what UC_Gen was trained on (replay)
+  ultrachat_eval: UltraChat_Sinhala/test_gen.parquet
+  ultrachat_ratio: 1.0          # UltraChat rows per Wikipedia train row -> 50/50
+  ultrachat_eval_rows: 500
+  eval_articles: 500
+  out_dir: wikipedia_sft/data/wiki_mix
+  seed: 42
+
+# ---------------------------------------------------------------------------
+# Prompt template -- byte-identical to sft/ and gen/. DO NOT EDIT.
+#
+# models/SinLlama_uc_gen_bilingual already ships exactly this as its
+# tokenizer's chat_template; changing anything here would strand what stages
+# 1-2 taught and change the cache fingerprint for no reason. The reasoning
+# behind the markers (Llama-3 role tokens are dead weights in this checkpoint)
+# is in sft/config.yaml and enforced by assert_template_tokens_usable().
+# ---------------------------------------------------------------------------
+template:
+  user_prefix: "### User:\n"
+  assistant_prefix: "### Assistant:\n"
+  turn_separator: "\n\n"
+  eos: "<|end_of_text|>"
+  system_prompt: ""
+  system_prefix: "### System:\n"
+  add_bos: true
+
+lora:                             # a FRESH adapter on the merged stage-2 model
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  modules_to_save: []             # embeddings frozen; the template needs no untrained token
+  peft_path: null                 # null -> fresh adapter, which is the point of this stage
+
+train:
+  output_dir: /workspace/sinllama_runs/wiki_mix_v2_lora
+  overwrite_output_dir: false     # false -> auto-resume from the last checkpoint
+  # A cap, not the plan: early stopping (below) ends the run. ~283 steps/epoch.
+  num_train_epochs: 6
+  learning_rate: 5.0e-5
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 16 # effective batch 64, same as v1
+  bf16: true
+  gradient_checkpointing: true
+  group_by_length: true
+  seed: 42
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 100                 # must be a multiple of eval_steps
+  save_total_limit: 3             # the best checkpoint is retained regardless
+  dataloader_num_workers: 4
+  ddp_timeout: 30000
+  compute_token_accuracy: true
+  use_liger_kernel: true          # requires `pip install "liger-kernel==0.5.10"`
+  skip_memory_metrics: true
+  report_to: wandb
+  wandb_project: sinllama-sft-uc
+  run_name: sinllama-uc-wiki-mix-v2
+
+early_stopping:
+  enabled: true
+  # Watch the Wikipedia half; eval_uc_loss is logged alongside to catch the
+  # replay half degrading. 3 evals x 100 steps without a new best -> stop;
+  # load_best_model_at_end keeps the minimum.
+  metric: eval_wiki_loss
+  patience: 3
+  threshold: 0.0
