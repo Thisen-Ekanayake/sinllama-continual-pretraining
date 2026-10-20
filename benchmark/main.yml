@@ -49,6 +49,12 @@ models:
   # merged onto SinLlama_UC_Gen_Model. Scored RAW, same as SinLlama_wiki.
   - name: SinLlama_wiki_clean
     path: models/SinLlama_wiki_clean
+  # Stage-3 v2 (wikipedia_sft/config_v2.yaml): a fresh LoRA r8 on
+  # SinLlama_UC_Gen_Model over length-matched Wikipedia answers mixed 50/50 with
+  # Sinhala UltraChat replay; best checkpoint (step 800) merged. Published as
+  # gs://sinllama_cpt/SinLlama_wiki_uc_gen_mix/. Scored RAW like its siblings.
+  - name: SinLlama_wiki_uc_gen_mix
+    path: models/SinLlama_wiki_uc_gen_mix
 
 # Model-name substrings scored/finetuned in the Alpaca
 # "### Instruction / ### Input / ### Response" template instead of the

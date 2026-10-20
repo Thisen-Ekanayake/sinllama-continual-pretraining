@@ -58,6 +58,46 @@ the change. Model names refer to the merged weights in `gs://sinllama_cpt`.
 - `docs/research-history.md`: the project history from February to September 2026, with model
   cards, datasets, evaluation, open questions and corrections to earlier write-ups.
 - `Wikipedia_Dataset/wikiextractor/`: a vendored copy of WikiExtractor.
+- `SinLlama_wiki_uc_gen_mix` in `benchmark/main.yml`, scored raw like its siblings. On 2026-10-19 it
+  was run through the standard harness on an NVIDIA A40, the same GPU as `SinLlama_wiki_clean`.
+  Differences are against `SinLlama_wiki_clean`, with exact McNemar p-values for MMLU:
+  - **MMLU:** Sinhala 38.80 % (+0.69 pp, p = 0.14). English 52.08 % (+1.08 pp, p = 5.3e-5), the
+    best English score of any SinLlama-line checkpoint.
+  - **Global-PIQA:** 4-split average 50.32 % (wiki_clean 50.58 %), within noise.
+  - **Downstream macro-F1:** news 91.41 / sentiment 78.88 / writing 97.65, against wiki_clean's
+    92.44 / 80.25 / 98.53. That is −2 / −12 / −10 test items; it still beats its parent UC_Gen on
+    news by +2.23 F1.
+  - Results are in `gs://sinllama_cpt/{mmlu_results_bf16,mmlu_results_english,piqa_*,downstream_*}/`.
+  - A debiased-MMLU run was started and cancelled; it has no permuted or calibrated score.
+- Raw MMLU for `SinLlama_UC_Gen_Model` (2026-10-19, NVIDIA L4, batch size 8), filling its
+  missing-score gap:
+  - Sinhala 38.09 %: −0.93 pp against its parent `uc_instruct_cleaned` (p = 0.011).
+  - English 51.92 %: +1.57 pp (p = 1.1e-7).
+  - Its three stage-3 children against it, net items Sinhala / English:
+    - `wiki`: +46 / −42 (not significant).
+    - `wiki_clean`: +1 / −129 (English p = 0.0011).
+    - `wiki_uc_gen_mix`: +49 (p = 0.047) / +23 (not significant).
+- Both runs are added to the reports in `results/latex/` and `results/pdf/` (gitignored), with the
+  raw predictions under `results/data/` and entries in `results/data/README.md`:
+  - **`SinLlama_wiki_uc_gen_mix`** (marked ◇) is in `MMLU_Benchmark`,
+    `MMLU_Answer_Distribution`, `MRL_Benchmarks`, `MRL_Answer_Distribution` and
+    `Downstream_Tasks`.
+  - **`UC_Gen`** (marked §) is in `MMLU_Benchmark`, `MMLU_Answer_Distribution` and
+    `MRL_Answer_Distribution`. The last uses UC_Gen's existing 2026-08-22 PIQA run.
+  - **`results/latex/Model_Comparison.tex`**: a one-page table comparing v01, v02, UC_Gen,
+    wiki_clean and wiki_uc_gen_mix on MMLU, Global-PIQA and the 100-prompt judge.
+- `docs/research-history.html`, a saved copy of the published research-history page.
+  `docs/model-tree.html`, a standalone model tree updated with `SinLlama_wiki_uc_gen_mix`. Both
+  are gitignored as `*.html`.
+
+### Changed
+- Two readings in the benchmark reports were corrected once UC_Gen's raw MMLU existed:
+  - **The English MMLU recovery happened in the gen stage, not the Wikipedia stage.** Against
+    UC_Gen, `wiki` and `wiki_uc_gen_mix` are flat in English, and only `wiki_clean` loses ground.
+  - **The Sinhala first-option answer bias is inherited from UC_Gen, not added by stage-3 SFT.**
+    UC_Gen puts 38.2 % of its answers on option 1 (TVD 16.0 pp; 85 and 87 of 92 on non-parallel
+    PIQA). Every stage-3 child lowers that bias (TVD 11.6–12.7 pp). Earlier text had compared the
+    children with `uc_instruct_cleaned`, two stages back.
 
 ### Known issues
 These were found while writing `docs/research-history.md` (§2) and have not been fixed in the repo yet:
@@ -78,8 +118,13 @@ These were found while writing `docs/research-history.md` (§2) and have not bee
   logs the second eval set's metrics (`eval_uc_*`) only to W&B, not to the text log.
 - The 100-prompt judge comparison is one sampled answer per prompt from a single judge. The
   v2-vs-UC_Gen gap (+0.33) needs several samples per prompt before it can be confirmed.
-- Evaluation gaps: `SinLlama_UC_Gen_Model` has no raw or permuted MMLU score. No model from v02
-  onward has a HellaSwag score. The English debias run for `SinLlama_wiki_clean` failed.
+- Evaluation gaps (HellaSwag is out of scope):
+  - **No debiased (permuted) MMLU** for `SinLlama_UC_Gen_Model` (calibrated arm only),
+    `SinLlama_wiki_clean` (its Sinhala arm is in GCS `results_29_09_2026/` but not reported;
+    English failed) or `SinLlama_wiki_uc_gen_mix`.
+  - **No 100-prompt judge** for `uc_instruct_cleaned`, `wiki` or `Bactrianx_Instruct`.
+  - **`uc_instruct` (raw corpus)** has MMLU and PIQA data but no downstream probes or judge, and
+    is not in the reports.
 
 ## 2026-09-29: Wrap-up runs (phase 13)
 
