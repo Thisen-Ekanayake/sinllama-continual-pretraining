@@ -1,0 +1,117 @@
+# textbook_sft/config.yaml
+# Stage-4 SFT: Sinhala school textbooks (grades 6-11) as instruction rows +
+# cleaned Sinhala UltraChat replay (equal tokens), on top of the wiki v2 model.
+#
+#   python textbook_sft/build_textbook_sft_dataset.py --dry-run --show 2
+#   python textbook_sft/build_textbook_sft_dataset.py
+#   python sft/run_sft_uc.py --config textbook_sft/config.yaml --preview 3
+#
+# Same recipe as wikipedia_sft/config_v2.yaml (length-matched answers, varied
+# deterministic prompts, UltraChat replay, two eval sets, early stopping);
+# details in textbook_sft/build_textbook_sft_dataset.py.
+
+model:
+  # The wiki v2 model (best judged so far: 5.44 vs UC_Gen 5.11).
+  path: models/SinLlama_wiki_uc_gen_mix
+  gcs_uri: gs://sinllama_cpt/SinLlama_wiki_uc_gen_mix
+  tokenizer_path: null
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  low_cpu_mem_usage: true
+
+data:
+  train_file: textbook_sft/data/textbook_mix/train_mix.parquet
+  # Two eval sets -> eval_textbook_loss and eval_uc_loss, so a drop in
+  # instruction-following data fit shows up next to the textbook fit.
+  eval_file:
+    textbook: textbook_sft/data/textbook_mix/eval_textbook.parquet
+    uc: textbook_sft/data/textbook_mix/eval_uc.parquet
+  eval_samples: null
+  eval_seed: 42
+  max_seq_length: 2048
+  cache_dir: textbook_sft/data/textbook_mix_cache
+  preprocessing_num_workers: 8
+  max_train_samples: null
+  max_eval_samples: null
+
+# Consumed only by textbook_sft/build_textbook_sft_dataset.py.
+textbook_mix:
+  markdown_dir: textbooks/markdown        # extract_arts.py + extract_technical.py output
+  # cleaned UltraChat SFT split (sft/clean_ultrachat.py) -- replay, not re-cleaned
+  ultrachat_train: UltraChat_Sinhala_cleaned/train_sft_clean.parquet
+  ultrachat_eval: UltraChat_Sinhala_cleaned/test_sft_clean.parquet
+  ultrachat_token_ratio: 1.0    # replay tokens per textbook token (templated) -> equal tokens
+  ultrachat_eval_rows: 500
+  eval_percent: 4               # held-out lessons (split by chapter, not by row)
+  out_dir: textbook_sft/data/textbook_mix
+  seed: 42
+
+# ---------------------------------------------------------------------------
+# Prompt template -- byte-identical to sft/ and gen/. DO NOT EDIT.
+#
+# models/SinLlama_uc_gen_bilingual already ships exactly this as its
+# tokenizer's chat_template; changing anything here would strand what stages
+# 1-2 taught and change the cache fingerprint for no reason. The reasoning
+# behind the markers (Llama-3 role tokens are dead weights in this checkpoint)
+# is in sft/config.yaml and enforced by assert_template_tokens_usable().
+# ---------------------------------------------------------------------------
+template:
+  user_prefix: "### User:\n"
+  assistant_prefix: "### Assistant:\n"
+  turn_separator: "\n\n"
+  eos: "<|end_of_text|>"
+  system_prompt: ""
+  system_prefix: "### System:\n"
+  add_bos: true
+
+lora:                             # a FRESH adapter on the merged stage-2 model
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  modules_to_save: []             # embeddings frozen; the template needs no untrained token
+  peft_path: null                 # null -> fresh adapter, which is the point of this stage
+
+train:
+  output_dir: /workspace/sinllama_runs/textbook_mix_lora
+  overwrite_output_dir: false     # false -> auto-resume from the last checkpoint
+  # A cap, not the plan: early stopping (below) ends the run. 3, not 10: wiki v2
+  # peaked at epoch 2.8 at a 4x lower LR, and a short cap lets the cosine schedule
+  # actually decay before the best checkpoint (docs/lora-hyperparameters.md).
+  num_train_epochs: 3
+  # LoRA LR ~10x the full-FT LR (docs/lora-hyperparameters.md). Keep the ".0":
+  # "2e-4" is parsed as a string. Fall back to 1.0e-4 if eval_uc_loss rises
+  # > ~0.02 above its first evaluation or loss / grad-norm spike.
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 16 # effective batch 64, same as v1
+  bf16: true
+  gradient_checkpointing: true
+  group_by_length: true
+  seed: 42
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 100                 # must be a multiple of eval_steps
+  save_total_limit: 3             # the best checkpoint is retained regardless
+  dataloader_num_workers: 4
+  ddp_timeout: 30000
+  compute_token_accuracy: true
+  use_liger_kernel: true          # requires `pip install "liger-kernel==0.5.10"`
+  skip_memory_metrics: true
+  report_to: wandb
+  wandb_project: sinllama-sft-uc
+  run_name: sinllama-textbook-mix
+
+early_stopping:
+  enabled: true
+  # Watch the textbook half; eval_uc_loss is logged alongside to catch the
+  # replay half degrading. 3 evals x 100 steps without a new best -> stop;
+  # load_best_model_at_end keeps the minimum.
+  metric: eval_textbook_loss
+  patience: 3
+  threshold: 0.0

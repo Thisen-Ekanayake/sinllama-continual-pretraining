@@ -49,3 +49,6 @@ wiki_*
 # textbook pipeline: downloaded PDFs, VLM caches and logs
 textbooks/cache/
 textbooks/pdfs/
+
+# textbook SFT build output (parquet, manifests)
+textbook_sft/data/
