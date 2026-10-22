@@ -45,3 +45,7 @@ wiki_*
 # small hand-authored config, not data, despite the blanket *.jsonl above.
 !inference/*.jsonl
 !CHANGELOG.md
+
+# textbook pipeline: downloaded PDFs, VLM caches and logs
+textbooks/cache/
+textbooks/pdfs/
