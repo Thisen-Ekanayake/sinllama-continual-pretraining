@@ -95,8 +95,10 @@ train:
   group_by_length: true
   seed: 42
   logging_steps: 10
-  eval_steps: 100
-  save_steps: 100                 # must be a multiple of eval_steps
+  # 15,168 rows / batch 64 = ~237 steps/epoch, ~711 at the cap: evaluate every 50
+  # so early stopping (3 evals without a new best = 150 steps) has resolution.
+  eval_steps: 50
+  save_steps: 50                  # must be a multiple of eval_steps
   save_total_limit: 3             # the best checkpoint is retained regardless
   dataloader_num_workers: 4
   ddp_timeout: 30000
@@ -110,7 +112,7 @@ train:
 early_stopping:
   enabled: true
   # Watch the textbook half; eval_uc_loss is logged alongside to catch the
-  # replay half degrading. 3 evals x 100 steps without a new best -> stop;
+  # replay half degrading. 3 evals x 50 steps without a new best -> stop;
   # load_best_model_at_end keeps the minimum.
   metric: eval_textbook_loss
   patience: 3
