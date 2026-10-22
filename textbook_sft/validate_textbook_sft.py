@@ -10,7 +10,9 @@ Checks
   failure modes  very short or apparently truncated answers, answer == prompt,
                  one prompt mapped to many different answers, repetition loops,
                  non-Sinhala answers
-  contamination  textbook eval vs train, UltraChat eval vs train, and every
+  contamination  textbook eval vs train, UltraChat eval vs train (and vs the
+                 whole UltraChat train split it was sampled from), cross-source
+                 eval vs train, ids across splits, and every
                  training row vs the benchmark sets on disk (MMLU-Sinhala test /
                  validation / dev, news / sentiment / writing test, the 100-prompt
                  and benchmark probe prompts) by Sinhala word 8-gram overlap
@@ -35,7 +37,7 @@ from transformers import AutoTokenizer
 
 REPO = Path(__file__).resolve().parents[1]
 DATA = REPO / "textbook_sft" / "data" / "textbook_mix"
-TOKENIZER = REPO / "models" / "SinLlama_cpt"
+TOKENIZERS = [REPO / "models" / "SinLlama_wiki_uc_gen_mix", REPO / "models" / "SinLlama_cpt"]
 TEMPLATE = {"user": "### User:\n", "assistant": "### Assistant:\n", "sep": "\n\n", "eos": "<|end_of_text|>"}
 N = 8  # word n-gram size for overlap
 
@@ -196,6 +198,27 @@ def main():
         "uc_eval_id_in_train": len({r["id"] for r in ev_uc} & {r["id"] for r in uc_train}),
         "uc_eval_>=50%_8gram_in_train": overlap(ev_uc, all_grams),
     }
+    # UltraChat: by first user turn, against replay train and the full source split
+    first_q = lambda r: re.sub(r"\W+", "", r["messages"][0]["content"])
+    uc_eval_q = {first_q(r) for r in ev_uc}
+    contam["uc_eval_prompt_in_replay_train"] = len(uc_eval_q & {first_q(r) for r in uc_train})
+    cfg = __import__("yaml").safe_load(open(REPO / "textbook_sft/config.yaml"))["textbook_mix"]
+    src = pq.read_table(REPO / cfg["ultrachat_train"], columns=["prompt_id", "messages"])
+    src_q, src_ids = set(), set(src.column("prompt_id").to_pylist())
+    for m in src.column("messages").to_pylist():
+        if m:
+            src_q.add(re.sub(r"\W+", "", m[0]["content"]))
+    contam["uc_eval_prompt_in_full_uc_train_split"] = len(uc_eval_q & src_q)
+    contam["uc_eval_id_in_full_uc_train_split"] = len({r["id"] for r in ev_uc} & src_ids)
+    # cross-source
+    uc_grams = set().union(*(ngrams(train_text(r)) for r in uc_train))
+    contam["textbook_eval_>=50%_8gram_in_uc_train"] = overlap(ev_tb, uc_grams)
+    contam["uc_eval_>=50%_8gram_in_textbook_train"] = overlap(ev_uc, tb_grams)
+    split_ids = {k: {r["id"] for r in v} for k, v in splits.items()}
+    contam["ids_shared_between_splits"] = {
+        f"{a}&{b}": len(split_ids[a] & split_ids[b])
+        for i, a in enumerate(split_ids) for b in list(split_ids)[i + 1:]}
+
     bench = defaultdict(Counter)
     examples = []
     for name, text in benchmark_items():
@@ -216,7 +239,7 @@ def main():
     report["contamination"] = contam
 
     # ---- tokens
-    tok = AutoTokenizer.from_pretrained(TOKENIZER)
+    tok = AutoTokenizer.from_pretrained(next(p for p in TOKENIZERS if p.exists()))
     def templated(r):
         parts = [(TEMPLATE["user"] if x["role"] == "user" else TEMPLATE["assistant"]) + x["content"]
                  for x in r["messages"]]
