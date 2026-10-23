@@ -9,6 +9,10 @@ answer digit it scores highest.
         --model models/SinLlama_wiki_clean \
         --benchmark-predictions benchmark/mmlu/SinhalaMMLU_results_final/SinLlama_wiki_clean_predictions.jsonl
 
+Add --load-in-8bit to load the model with bitsandbytes 8-bit quantization
+(LLM.int8). The output file then gets an "_8bit" suffix by default so it never
+resumes from, or overwrites, a bf16 run.
+
 Questions, few-shot selection and model loading are imported from
 evaluate_sinhala_mmlu.py, so item i here is item i of that script's
 *_predictions.jsonl (the scored answer is joined in when
@@ -159,18 +163,22 @@ def main():
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-len", type=int, default=4096)
     ap.add_argument("--limit", type=int, default=0, help="first N valid items only (0 = all)")
+    ap.add_argument("--load-in-8bit", action="store_true",
+                    help="load the model with bitsandbytes 8-bit quantization (LLM.int8). "
+                         "Default output filename gets an _8bit suffix.")
     ap.add_argument("--benchmark-predictions", default=None,
                     help="*_predictions.jsonl from evaluate_sinhala_mmlu.py to join in")
     ap.add_argument("--out", default=None,
-                    help="default benchmark/mmlu/SinhalaMMLU_generations/<name>_<format>.json")
+                    help="default benchmark/mmlu/SinhalaMMLU_generations/<name>_<format>[_8bit].json")
     ap.add_argument("--save-every", type=int, default=20, help="batches between saves")
     ap.add_argument("--reparse-only", action="store_true",
                     help="re-run parse_answer over an existing --out file; no model is loaded")
     args = ap.parse_args()
 
     name = args.name or os.path.basename(os.path.normpath(args.model))
+    suffix = "_8bit" if args.load_in_8bit else ""
     out = args.out or os.path.join("benchmark/mmlu/SinhalaMMLU_generations",
-                                   f"{name}_{args.format}.json")
+                                   f"{name}_{args.format}{suffix}.json")
 
     if args.reparse_only:
         data = json.load(open(out, encoding="utf-8"))
@@ -186,6 +194,7 @@ def main():
         return
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     max_new = args.max_new_tokens or (256 if args.format == "chat" else 16)
+    precision = "int8" if args.load_in_8bit else "bf16"
 
     template = load_template(args.prompt_file)
     records, missing = build_examples(args.data_root, template, args.kshot)
@@ -210,6 +219,11 @@ def main():
         prev = json.load(open(out, encoding="utf-8"))
         if prev["meta"]["format"] != args.format:
             raise SystemExit(f"{out} holds format={prev['meta']['format']!r}; use another --out")
+        # files written before the precision field existed were bf16
+        prev_precision = prev["meta"].get("precision", "bf16")
+        if prev_precision != precision:
+            raise SystemExit(f"{out} holds precision={prev_precision!r} but this run is "
+                             f"{precision!r}; use another --out")
         items = {it["id"]: it for it in prev["items"] if it.get("model_answer") is not None}
         print(f"resuming: {len(items)} item(s) already in {out}", file=sys.stderr)
     todo = [i for i in idx if i not in items]
@@ -219,7 +233,7 @@ def main():
         p = records[i]["prompt"]
         prompts[i] = chat_prompt(p) if args.format == "chat" else p
 
-    model, tok = load_model(args.model)
+    model, tok = load_model(args.model, args.load_in_8bit)
     eos_ids = [tok.convert_tokens_to_ids(CHAT_EOS)]
     if tok.eos_token_id is not None and tok.eos_token_id not in eos_ids:
         eos_ids.append(tok.eos_token_id)
@@ -228,6 +242,7 @@ def main():
 
     meta = {
         "model": name, "model_path": args.model, "format": args.format,
+        "precision": precision,
         "kshot": args.kshot if args.format == "fewshot" else 0,
         "generation": {"max_new_tokens": max_new, "greedy": True},
         "benchmark_predictions": args.benchmark_predictions,

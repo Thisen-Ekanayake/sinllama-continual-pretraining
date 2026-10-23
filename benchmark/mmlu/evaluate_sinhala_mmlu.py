@@ -19,6 +19,7 @@ Method
   instruct model, which was SFT'd on the Alpaca template) is re-wrapped in the
   "### Instruction / ### Input / ### Response" scaffold. The digit-scoring step is
   identical either way — only the surrounding text changes.
+* Precision: bf16 by default; --load-in-8bit loads with bitsandbytes LLM.int8.
 
 Outputs (per model): a human-readable *_results.txt, a machine-readable
 *_metrics.json and a *_predictions.jsonl. Finally a combined results.md.
@@ -27,7 +28,7 @@ import os, re, json, glob, time, argparse, gc, shutil, subprocess
 from collections import defaultdict
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 try:
     from tqdm import tqdm
@@ -333,7 +334,10 @@ def compute_cf_bias(model, tok, cf_prompts, digit_id, max_len, batch_size=8):
     return bias
 
 
-def load_model(path):
+def load_model(path, load_in_8bit=False):
+    """Load model + tokenizer. With load_in_8bit=True the weights are quantized
+    on load with bitsandbytes (LLM.int8); non-quantized layers stay bf16. The
+    eager-attention requirement and its assert_eager check apply either way."""
     tok = AutoTokenizer.from_pretrained(path)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -343,9 +347,11 @@ def load_model(path):
     # mis-handles left-padding masks in batched inference — it collapses every
     # prediction to the first option (verified on English MMLU: sdpa all-"A" acc
     # 0.32 vs eager acc 0.70). Batched left-padded scoring must use eager here.
-    model = AutoModelForCausalLM.from_pretrained(
-        path, torch_dtype=torch.bfloat16, device_map="auto",
-        attn_implementation="eager")
+    kwargs = dict(torch_dtype=torch.bfloat16, device_map="auto",
+                  attn_implementation="eager")
+    if load_in_8bit:
+        kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
     assert_eager(model, path)
     model.eval()
     return model, tok
@@ -471,7 +477,7 @@ def write_md(path, name, m):
     L = [f"# SinhalaMMLU — {name}\n",
          f"**Overall accuracy: {o['accuracy']:.2f}%** "
          f"({o['correct']}/{o['total']}) · {m['skipped']} malformed skipped · "
-         f"3-shot · bf16 · {m.get('format', 'raw')} prompt\n"]
+         f"3-shot · {m.get('precision', 'bf16')} · {m.get('format', 'raw')} prompt\n"]
 
     def section(title, table, order=None):
         L.append(f"\n## {title}\n")
@@ -522,7 +528,7 @@ def write_results_md(path, all_metrics, meta):
              f"{meta['skipped_note']})")
     L.append(f"- Setting: **{meta['k']}-shot**, official prompt template, "
              f"answer chosen by highest option-digit probability")
-    L.append(f"- Precision: **bf16** on {meta['gpu']}")
+    L.append(f"- Precision: **{meta['precision']}** on {meta['gpu']}")
     L.append(f"- Prompt format: base/CPT models scored **raw**; instruct models "
              f"scored in their **Alpaca SFT template** (see the *Format* column)")
     L.append(f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -626,10 +632,16 @@ def main():
                          "positional prior, estimated from a content-free "
                          "(all-'N/A') prompt, before argmax. Estimated per "
                          "(difficulty, subject, n_choices).")
+    ap.add_argument("--load-in-8bit", action="store_true",
+                    help="load models with bitsandbytes 8-bit quantization "
+                         "(LLM.int8). Results are keyed by model name, so use a "
+                         "separate --out-dir from bf16 runs.")
     ap.add_argument("--combine-only", action="store_true",
                     help="skip evaluation: just rebuild (and upload) the combined "
                          "results.md from existing <model>_metrics.json files")
     args = ap.parse_args()
+
+    precision = "int8 (bitsandbytes)" if args.load_in_8bit else "bf16"
 
     os.makedirs(args.out_dir, exist_ok=True)
     template = load_template(args.prompt_file)
@@ -662,7 +674,7 @@ def main():
                 print(f"  (combine) missing {mpath} — skipping")
         if not all_metrics:
             raise SystemExit("combine-only: no *_metrics.json found in --out-dir")
-        meta = dict(k=args.kshot, gpu=gpu, total=n_valid,
+        meta = dict(k=args.kshot, gpu=gpu, total=n_valid, precision=precision,
                     skipped_note=f"{n_skip} malformed answers excluded")
         rpath = os.path.join(args.out_dir, "results.md")
         write_results_md(rpath, all_metrics, meta)
@@ -684,9 +696,10 @@ def main():
             print(f"\n=== {name}: reusing cached metrics "
                   f"({m['overall']['accuracy']:.2f}%) ===")
         else:
-            print(f"\n=== Evaluating {name}  (prompt format: {fmt}) ===")
+            print(f"\n=== Evaluating {name}  (prompt format: {fmt}, "
+                  f"precision: {precision}) ===")
             t0 = time.time()
-            model, tok = load_model(path)
+            model, tok = load_model(path, args.load_in_8bit)
             records = [dict(r) for r in records0]      # fresh copy per model
             if use_alpaca:                             # re-wrap in the SFT template
                 for r in records:
@@ -714,6 +727,7 @@ def main():
             m = compute_metrics(records)
             m["format"] = fmt                          # persist into metrics.json
             m["calibrated"] = bool(args.calibrate)
+            m["precision"] = "int8" if args.load_in_8bit else "bf16"
             print(f"  {name}: {m['overall']['accuracy']:.2f}%  "
                   f"({m['overall']['correct']}/{m['overall']['total']}) "
                   f"in {time.time()-t0:.0f}s")
@@ -736,7 +750,7 @@ def main():
             gcs_cp(per_model_files(args.out_dir, name),
                    args.bucket.rstrip("/") + f"/{name}/")
 
-    meta = dict(k=args.kshot, gpu=gpu, total=n_valid,
+    meta = dict(k=args.kshot, gpu=gpu, total=n_valid, precision=precision,
                 skipped_note=f"{n_skip} malformed answers excluded")
     rpath = os.path.join(args.out_dir, "results.md")
     write_results_md(rpath, all_metrics, meta)
