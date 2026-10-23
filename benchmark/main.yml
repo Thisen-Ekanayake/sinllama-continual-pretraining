@@ -55,6 +55,13 @@ models:
   # gs://sinllama_cpt/SinLlama_wiki_uc_gen_mix/. Scored RAW like its siblings.
   - name: SinLlama_wiki_uc_gen_mix
     path: models/SinLlama_wiki_uc_gen_mix
+  # Stage-4 textbook SFT (textbook_sft/config.yaml): a fresh LoRA r8/alpha16/
+  # lr 2.0e-4 on SinLlama_wiki_uc_gen_mix over instruction rows built from 113
+  # Sinhala-medium school textbooks (grades 6-11) plus cleaned UltraChat sft
+  # replay matched in tokens; best checkpoint (step 500) merged. Published as
+  # gs://sinllama_cpt/SinLlama_textbook_mix/. Scored RAW like its siblings.
+  - name: SinLlama_textbook_mix
+    path: models/SinLlama_textbook_mix
 
 # Model-name substrings scored/finetuned in the Alpaca
 # "### Instruction / ### Input / ### Response" template instead of the
