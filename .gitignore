@@ -37,6 +37,7 @@ weights_analysis/new/weights_analysis/
 *.out
 *.xml
 wiki_*
+*.zip
 
 !requirements.txt
 !requirements_amd.txt
