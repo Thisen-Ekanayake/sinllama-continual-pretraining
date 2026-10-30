@@ -1,0 +1,65 @@
+# textbook_cpt/config.yaml
+# Plain causal-LM LoRA (no chat template) on the Sinhala school textbooks
+# (grades 6-11) only, on top of the wiki v2 model -- the raw-text counterpart of
+# textbook_sft/ (instruction rows + UltraChat replay).
+#
+#   python textbook_cpt/build_textbook_cpt_dataset.py
+#   python textbook_cpt/run_textbook_cpt.py --config textbook_cpt/config.yaml
+
+model:
+  path: models/SinLlama_wiki_uc_gen_mix   # same parent as textbook_sft
+  tokenizer_path: null
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  low_cpu_mem_usage: true
+
+data:
+  train_file: textbook_cpt/data/train.parquet   # 1,271 chapters, ~4.36M tokens
+  eval_file: textbook_cpt/data/eval.parquet     # 54 held-out chapters, ~201k tokens
+  block_size: 2048                              # textbook_sft max_seq_length
+  preprocessing_num_workers: 8
+
+# Consumed only by textbook_cpt/build_textbook_cpt_dataset.py.
+textbook_cpt:
+  markdown_dir: textbooks/markdown
+  eval_percent: 4                 # held-out chapters, as textbook_sft
+  out_dir: textbook_cpt/data
+  seed: 42
+
+lora:                             # = textbook_sft/config.yaml
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  modules_to_save: []
+
+train:
+  output_dir: /workspace/sinllama_runs/textbook_cpt_lora
+  overwrite_output_dir: false     # false -> auto-resume from the last checkpoint
+  # Full 5 epochs, no early stopping; load_best_model_at_end keeps the
+  # lowest eval_loss checkpoint, and the final step is checkpointed too.
+  num_train_epochs: 5
+  learning_rate: 1.0e-4           # keep the ".0": "1e-4" is parsed as a string
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  # 16 packed blocks x 2048 = 32k tokens/step; ~2,130 blocks -> ~133 steps/epoch,
+  # ~665 steps total (textbook_sft: ~711 steps at its 3-epoch cap).
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
+  bf16: true
+  gradient_checkpointing: true
+  seed: 42
+  logging_steps: 10
+  eval_steps: 50
+  save_steps: 50                  # must be a multiple of eval_steps
+  save_total_limit: 3             # the best checkpoint is retained regardless
+  dataloader_num_workers: 4
+  ddp_timeout: 30000
+  use_liger_kernel: true          # requires `pip install "liger-kernel==0.5.10"`
+  skip_memory_metrics: true
+  report_to: wandb
+  wandb_project: sinllama-cpt
+  run_name: sinllama-textbook-cpt
