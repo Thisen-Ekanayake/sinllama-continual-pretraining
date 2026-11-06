@@ -8,6 +8,7 @@ template (prompt_template.txt), i.e. the model's own tokenizer chat template.
   python gen_sinllama.py --lang en --inp ../vqa_english.json --out sinllama_en_generated.json
   python gen_sinllama.py --lang si --inp ../vqa_sinhala.json --out sinllama_si_generated.json
   add --shots shots.json for k-shot (exemplars become earlier turns of the dialogue)
+  add --adapter DIR for a LoRA fine-tune (ft_vqa.py), merged into the bf16 weights in memory
 
 Greedy decoding, repetition_penalty 1.1, max_new_tokens 256 (dataset answers: p99 134 en /
 149 si tokens). Resumable through <out>.jsonl.
@@ -52,11 +53,15 @@ class CPUHead(nn.Module):
         return (h.to(self.w.dtype).cpu() @ self.w.T).float().to(self.device)
 
 
-def load(model_dir, head_fp32=False):
+def load(model_dir, head_fp32=False, adapter=None):
     tok = AutoTokenizer.from_pretrained(model_dir)
     tok.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16,
                                                  low_cpu_mem_usage=True, attn_implementation="sdpa")
+    if adapter:   # trained on the nf4 base (QLoRA); merged into bf16 so decoding matches the 0-shot run
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, adapter).merge_and_unload()
+        print(f"merged adapter {adapter}", flush=True)
     dev = torch.device("cuda")
     emb_w = model.model.embed_tokens.weight.data
     head_w = model.lm_head.weight.data
@@ -100,6 +105,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--model", default=os.path.expanduser(
         "~/sinllama-continual-pretraining/models/SinLlama_wiki_uc_gen_mix"))
+    ap.add_argument("--adapter", help="LoRA adapter dir to merge into --model")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--max-new-tokens", type=int, default=256)
@@ -135,7 +141,7 @@ def main():
 
     if todo:
         torch.set_num_threads(args.threads)
-        tok, model = load(args.model, args.head_fp32)
+        tok, model = load(args.model, args.head_fp32, args.adapter)
         prompts = {r["image_id"]: build_prompt(tok, args.lang, r, shots) for r in todo}
         if not done:
             print("--- example prompt ---\n" + prompts[todo[0]["image_id"]] + "\n---", flush=True)
@@ -228,6 +234,7 @@ def main():
 
     out = [done[r["image_id"]] for r in data]
     meta = {"model": os.path.basename(os.path.normpath(args.model)), "lang": args.lang,
+            "adapter": args.adapter,
             "decoding": {"do_sample": False, "max_new_tokens": args.max_new_tokens,
                          "repetition_penalty": args.repetition_penalty,
                          "stop": ["<|end_of_text|>"] + STOP_STRINGS},
