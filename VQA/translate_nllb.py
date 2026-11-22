@@ -109,6 +109,11 @@ def main():
     ap.add_argument("--max-batch", type=int, default=32)
     ap.add_argument("--lexicon", default=os.path.join(HERE, "resources/sinhala_lexicon.pkl"))
     ap.add_argument("--vocab", default=os.path.join(HERE, "resources/unigram_32000_0.9995.vocab"))
+    ap.add_argument("--nopunct-first", action="store_true",
+                    help="try the sentence without its final punctuation first, the plain sentence second "
+                         "(on FLORES this removed 45/48 stock-phrase hallucinations and introduced none)")
+    ap.add_argument("--logprob", action="store_true",
+                    help="store each output's mean token log-probability (Seq-Logprob) in the cache")
     args = ap.parse_args()
 
     data = json.load(open(args.inp, encoding="utf-8"))
@@ -150,10 +155,19 @@ def main():
             with torch.inference_mode():
                 out = model.generate(**enc, forced_bos_token_id=tgt_id, num_beams=args.beams,
                                      max_new_tokens=max_new)
+                lps = [None] * len(sents)
+                if args.logprob:
+                    # teacher-forced mean log-probability of the output tokens
+                    labels = out[:, 1:]
+                    logits = model(**enc, decoder_input_ids=out[:, :-1]).logits.float()
+                    lp = torch.log_softmax(logits, -1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+                    mask = (labels != tok.pad_token_id).float()
+                    lps = [round(x, 4) for x in ((lp * mask).sum(1) / mask.sum(1)).tolist()]
+                    del logits, lp
             texts = [t.strip() for t in tok.batch_decode(out, skip_special_tokens=True)]
             # never emitted EOS -> ran to max_new_tokens (decoder start + forced bos counted)
             hit_max = [(row != tok.pad_token_id).sum().item() >= max_new for row in out]
-            return list(zip(texts, hit_max))
+            return list(zip(texts, hit_max, lps))
 
         def safe_generate(sents):
             try:
@@ -195,29 +209,32 @@ def main():
         with open(cache_path, "a", encoding="utf-8") as fout:
             for c0 in range(0, len(todo), chunk):
                 part = todo[c0:c0 + chunk]
-                cands = {s: [] for s in part}          # (stage, text, reason)
-                # stage 1: as is
-                r1 = translate_many(part)
-                bad = []
-                for s in part:
-                    t, hm = r1[s]
-                    why = problem(s, t, hm)
-                    cands[s].append(("plain", t, why))
-                    if why:
-                        bad.append(s)
-                # stage 2: without final punctuation, re-appended
-                if bad:
-                    r2 = translate_many([strip_punct(s)[0] for s in bad])
+                cands = {s: [] for s in part}          # (stage, text, reason, logprob)
+
+                def run_stage(name, sents):
+                    """plain: the sentence as is; nopunct: final punctuation removed, then re-appended."""
+                    if name == "plain":
+                        res = translate_many(sents)
+                        inp = {s: s for s in sents}
+                    else:
+                        inp = {s: strip_punct(s)[0] for s in sents}
+                        res = translate_many(list(inp.values()))
                     still = []
-                    for s in bad:
-                        core, p = strip_punct(s)
-                        t, hm = r2[core]
-                        t = with_punct(t, p)
+                    for s in sents:
+                        t, hm, lp = res[inp[s]]
+                        if name == "nopunct":
+                            t = with_punct(t, strip_punct(s)[1])
                         why = problem(s, t, hm)
-                        cands[s].append(("nopunct", t, why))
+                        cands[s].append((name, t, why, lp))
                         if why:
                             still.append(s)
-                    bad = still
+                    return still
+
+                # stages 1-2: as is / without final punctuation (order set by --nopunct-first)
+                bad = part
+                for name in (("nopunct", "plain") if args.nopunct_first else ("plain", "nopunct")):
+                    if bad:
+                        bad = run_stage(name, bad)
                 # stage 3: clause split, each clause as in stage 2
                 if bad:
                     def clause_core(c):       # clause without trailing , ; : . ! ?
@@ -230,28 +247,32 @@ def main():
                         cl = plans[s]
                         if not cl:
                             continue
-                        outs, broken = [], False
+                        outs, broken, lps = [], False, []
                         for c in cl:
-                            t, hm = r3[clause_core(c)]
+                            t, hm, lp = r3[clause_core(c)]
                             if HALLUCINATION.search(t) or hm or not t:
                                 broken = True
+                            if lp is not None:
+                                lps.append(lp)
                             sep = c.rstrip()[-1] if c.rstrip()[-1] in ",;:" else ""
                             outs.append(strip_punct(t.rstrip(",;: "))[0] + sep)
                         t = with_punct(" ".join(outs), strip_punct(s)[1])
                         why = "clause_hallucination" if broken else problem(s, t, False)
-                        cands[s].append(("clauses", t, why))
+                        cands[s].append(("clauses", t, why, round(min(lps), 4) if lps else None))
 
                 for s in part:
                     ok = [c for c in cands[s] if c[2] is None]
                     if ok:
-                        stage, t, _ = ok[0]
+                        stage, t, _, lp = ok[0]
                         j = {"src": s, "tgt": t, "stage": stage}
                     else:
                         # nothing passed: prefer non-hallucinated, then the longest
-                        stage, t, why = max(cands[s], key=lambda c: (
+                        stage, t, why, lp = max(cands[s], key=lambda c: (
                             c[2] not in ("hallucination", "clause_hallucination", "empty", "loop"), len(c[1])))
                         j = {"src": s, "tgt": t, "stage": stage, "flag": why,
-                             "candidates": [{"stage": a, "tgt": b, "why": w} for a, b, w in cands[s]]}
+                             "candidates": [{"stage": a, "tgt": b, "why": w} for a, b, w, _ in cands[s]]}
+                    if lp is not None:
+                        j["logprob"] = lp
                     cache[s] = j
                     fout.write(json.dumps(j, ensure_ascii=False) + "\n")
                 fout.flush()

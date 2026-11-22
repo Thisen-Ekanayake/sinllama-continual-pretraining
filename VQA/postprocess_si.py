@@ -39,6 +39,7 @@ LATIN_GAP = re.compile(rf"(?:(?P<L>[{SI}]+) )?(?P<w>[a-z]+)(?: (?P<R>[{SI}]+))?"
 
 
 ZWJ = "\u200d"
+SPLIT_HAL = re.compile(r"([\u0D9A-\u0DC6]) \u0DCA")
 HAL_SPACE = re.compile(rf"([{SI}]+\u0DCA) ([{SI}]+)")
 
 
@@ -144,6 +145,9 @@ def main():
     ap.add_argument("--out", default="vqa_sinhala.json")
     ap.add_argument("--lexicon", default="/ml/Datasets/UltraChat/data/sinhala_lexicon.pkl")
     ap.add_argument("--vocab", default="/ml/Datasets/UltraChat/tokenizer/unigram_32000_0.9995.vocab")
+    ap.add_argument("--fix-split-hal", action="store_true",
+                    help="first close the space NLLB sometimes puts before the virama ('ප ් රභවය' -> "
+                         "'ප් රභවය'), so the ZWJ repair can join it; a word never starts with a virama")
     args = ap.parse_args()
 
     W = load_lexicon(None, args.lexicon)
@@ -161,7 +165,7 @@ def main():
                     cache[j["src"]] = j      # later lines / files (repairs) override earlier ones
 
     stats = {"fixed": collections.Counter(), "unresolved": collections.Counter(), "examples": {},
-             "stem_prefix": 0}
+             "stem_prefix": 0, "split_hal": 0}
     fixed = {}
     for s, j in cache.items():
         t = j["tgt"]
@@ -170,6 +174,9 @@ def main():
         if m and not re.search(r"[.!?]{2,}$", s.rstrip()):
             sm = re.search(r"[.!?]$", s.rstrip())
             t = t.rstrip()[:m.start()] + (sm.group(0) if sm else m.group(0)[-1])
+        if args.fix_split_hal:
+            t, k = SPLIT_HAL.subn("\\1\u0DCA", t)
+            stats["split_hal"] += k
         t = norm.normalize(t)
         t = fix_rare(s, t, stats)
         fixed[s] = join_stem(norm.normalize(t), stats)
@@ -190,7 +197,7 @@ def main():
         json.dump(out, f, ensure_ascii=False, indent=2)
 
     print(f"wrote {len(out)} records to {args.out} ({missing} paragraphs with untranslated sentences)")
-    print(f"ZWJ merges: {norm.merges} lexicon + {stats['stem_prefix']} stem-prefix")
+    print(f"ZWJ merges: {norm.merges} lexicon + {stats['stem_prefix']} stem-prefix; split virama closed: {stats['split_hal']}")
     print(f"rare letters restored: {sum(stats['fixed'].values())} {dict(stats['fixed'].most_common())}")
     print(f"latin gaps left: {sum(stats['unresolved'].values())} {stats['unresolved'].most_common(15)}")
     for w, (a, b) in list(stats["examples"].items())[:25]:
