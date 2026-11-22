@@ -48,6 +48,39 @@ def sinhala_block(text, pdf_path):
     return ("\\begin{promptbox}\n\\includegraphics{" + os.path.basename(pdf_path) + "}\n\\end{promptbox}\n")
 
 
+def pval(p):
+    return "$<$0.001" if p < 1e-3 else f"{p:.3f}"
+
+
+def fine_tune_rows(keys):
+    """Test-set table (fine-tuned vs the 0-/5-shot runs on the same images) + training table."""
+    sf = json.load(open(os.path.join(HERE, "ft/summary_ft.json")))
+    test = set(json.load(open(os.path.join(HERE, "ft/test_ids.json"))))
+    rows, tr = [], []
+    for arm, lang in [("en", "English"), ("si", "Sinhala")]:
+        a = sf[arm]
+        g5 = [r for r in json.load(open(os.path.join(HERE, f"5shot/sinllama_{arm}_generated_5shot.json")))["records"]
+              if r["image_id"] in test]
+        tok = {"zero_shot": a["generation_zero_shot"]["mean_generated_tokens"],
+               "five_shot": sum(r["generated_tokens"] for r in g5) / len(g5),
+               "finetuned": a["generation_ft"]["mean_generated_tokens"]}
+        for key, name, cmp in [("zero_shot", "0-shot", None), ("five_shot", "5-shot", None),
+                               ("finetuned", "Fine-tuned", "ft_vs_zero_shot")]:
+            c = a[key]
+            sc = f"\\textbf{{{c['score_100']:.2f}}}" if key == "finetuned" else f"{c['score_100']:.2f}"
+            d = (f"{a[cmp]['diff_100']:+.2f} ({pval(a[cmp]['wilcoxon_p'])})" if cmp else "--")
+            rows.append(f"{lang} & {name} & {c['n']} & {sc} & " + " & ".join(f"{c[k]:.2f}" for k in keys)
+                        + f" & {tok[key]:.0f} & {d} \\\\")
+        if arm == "en":
+            rows.append(r"\midrule")
+        t = json.load(open(os.path.join(HERE, f"ft/{arm}/train_state.json")))
+        first = next(x["eval_loss"] for x in t["log_history"] if "eval_loss" in x)
+        best = int(t["best_checkpoint"].rsplit("-", 1)[1])
+        tr.append(f"{lang} & {t['n_train']} / {t['n_val']} & {best} ({best / t['global_step'] * t['epochs_done']:.1f}) "
+                  f"& {t['global_step']} & {first:.3f} $\\to$ {t['best_eval_loss']:.3f} & {t['train_minutes']:.0f} \\\\")
+    return "\n".join(rows), "\n".join(tr)
+
+
 def main():
     s5 = json.load(open(os.path.join(HERE, "5shot/summary_5shot.json")))
     toks = {}
@@ -66,6 +99,8 @@ def main():
                         + " & ".join(f"{crit[k]:.2f}" for k in keys) + f" & {toks[arm, shots]:.0f} \\\\")
         if arm == "en":
             rows.append(r"\midrule")
+
+    ft_rows, tr_rows = fine_tune_rows(keys)
 
     crit_rows = "\n".join(f"{esc(c['name'])} & {c['weight']:.2f} & {esc(c['description'])} \\\\"
                           for c in judge.CRITERIA)
@@ -113,7 +148,7 @@ Language & Shots & Score & Q.\ underst. & Correctness & Completeness & Coherence
 """ + "\n".join(rows) + r"""
 \bottomrule
 \end{tabular}
-\caption{SinLlama\_wiki\_uc\_gen\_mix on the VQA benchmark (score /100, Qwen3.5-9B judge), 0-shot and 5-shot.}
+\caption{SinLlama\_wiki\_uc\_gen\_mix on the full VQA dataset (5{,}000 samples; both rows scored on the 4{,}995 that are not 5-shot exemplars), score /100, Qwen3.5-9B judge, 0-shot and 5-shot.}
 \label{tab:results}
 \end{table}
 
@@ -130,6 +165,43 @@ Criterion & Weight & Definition given to the judge \\
 \label{tab:criteria}
 \end{table}
 
+\section*{Fine-tuning (QLoRA)}
+One LoRA adapter per language on SinLlama\_wiki\_uc\_gen\_mix, 80/10/10 split by image (seed 42, same images for
+both languages): 4{,}000 / 500 / 500, minus 6 training rows whose reference answers repeat themselves.
+Hyperparameters as the textbook SFT: r 8, $\alpha$ 16, dropout 0.05, all 7 projections, lr $2\cdot10^{-4}$ cosine,
+warmup 3\%, batch 64, max 3 epochs, loss on the answer only; base in 4-bit NF4; validation every 10 steps,
+early stopping (patience 3), best checkpoint kept. At test time the adapter is merged into the bf16 model and
+decoded as in the 0-shot run (greedy, repetition penalty 1.1, max 256 new tokens).
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{lccccc}
+\toprule
+Language & Train / val & Best step (epoch) & Stopped at & Val loss (step 10 $\to$ best) & Minutes \\
+\midrule
+""" + tr_rows + r"""
+\bottomrule
+\end{tabular}
+\caption{Training.}
+\label{tab:ft-train}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{llcccccccc}
+\toprule
+Language & Model & $n$ & Score & Q.\ underst. & Correctness & Completeness & Coherence & Ans.\ tokens & $\Delta$ vs 0-shot ($p$) \\
+\midrule
+""" + ft_rows + r"""
+\bottomrule
+\end{tabular}
+\caption{Test set (500 images). 0-shot and 5-shot rows are the runs of Table~\ref{tab:results} restricted to the
+test images (5-shot $n=499$: one exemplar is a test image). $p$: paired Wilcoxon signed-rank on per-answer scores.}
+\label{tab:ft}
+\end{table}
+
+\clearpage
 \section*{Judge prompt}
 One call per answer, output constrained to JSON (\texttt{rationale} + the four integer scores).
 """ + prompt_block(judge_prompt) + r"""
