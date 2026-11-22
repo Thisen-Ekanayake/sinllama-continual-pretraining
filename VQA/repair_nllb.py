@@ -50,10 +50,21 @@ SPLIT = re.compile(
 TARGET_RATIO, MIN_RATIO, MIN_RATIO_WORDS = 0.95, 0.55, 12
 
 
+LONG_LOOPS = False   # --long-loops: scan_loops.py's definition (1-10 word units, 6-gram x3)
+
+
 def is_loop(t, hit_max=False):
     if hit_max:
         return True
     w = t.split()
+    if LONG_LOOPS:
+        for n in range(1, 11):   # a 1-10 word unit three times in a row
+            for i in range(len(w) - 3 * n + 1):
+                if w[i:i + n] == w[i + n:i + 2 * n] == w[i + 2 * n:i + 3 * n]:
+                    return True
+        g6 = collections.Counter(tuple(w[i:i + 6]) for i in range(len(w) - 5))
+        if g6 and max(g6.values()) >= 3:
+            return True
     for n in (1, 2, 3):          # the same 1-3 word unit three times in a row
         for i in range(len(w) - 3 * n + 1):
             if w[i:i + n] == w[i + n:i + 2 * n] == w[i + 2 * n:i + 3 * n]:
@@ -119,7 +130,11 @@ def main():
     ap.add_argument("--beams", type=int, default=4)
     ap.add_argument("--tok-budget", type=int, default=1024)
     ap.add_argument("--max-batch", type=int, default=32)
+    ap.add_argument("--long-loops", action="store_true",
+                    help="also flag 4-10 word units repeated 3x and 6-grams seen 3x (COCO train2017 loop fix)")
     args = ap.parse_args()
+    global LONG_LOOPS
+    LONG_LOOPS = args.long_loops
 
     cache = {}
     for line in open(args.cache, encoding="utf-8"):
