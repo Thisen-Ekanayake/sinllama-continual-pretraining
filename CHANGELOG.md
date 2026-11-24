@@ -4,10 +4,278 @@ All notable changes to this repository, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The repo has no version
 tags, so each entry is a dated project phase; the phase numbers match §4 of
 [`docs/research-history.md`](docs/research-history.md), which has the full
-narrative, model cards and evidence. Short hashes point to the commit that made
-the change. Model names refer to the merged weights in `gs://sinllama_cpt`.
+narrative, model cards and evidence; phases 14 onwards are not in it yet. Short
+hashes point to the commit that made the change. Model names refer to the merged
+weights in `gs://sinllama_cpt`. That bucket was deleted with its GCP project on
+2026-11-02; the same files are in Google Drive under `sinllama_cpt/`, where every
+later model is stored too.
 
 ## [Unreleased]
+
+### Known issues
+Not fixed in the repo yet. The first group comes from the phase-19 sweep; the rest were found while
+writing `docs/research-history.md` (§2).
+- From the `SinLlama_instruct_mix` sweep:
+  - **The lab-box downstream probes saved no per-item predictions**, so the differences from the
+    parent are item counts with no paired test.
+  - **167 English MMLU items were cut to 768 tokens** for both models. The 16 GB loader
+    (`tb_eval/mmlu16_fixed.py`) has to do this to fit them in memory.
+  - **The first English MMLU run is invalid.** 1,813 items failed on a cascade of out-of-memory
+    errors. It is kept as `EnglishMMLU_results_permuted_INVALID_oom`.
+- `docs/benchmark-report.md` and `inference/models.yml` present `SinLlama_v02` as a base/CPT
+  checkpoint. It is v01 plus a short MMLU-format SFT, so part of its MMLU lead is format learning.
+- `benchmark/results/prior_2026-08-01/` holds results from a 2026-08-09/10 run, not 08-01.
+- The downstream tables report single runs. Repeating a run with the same config and seed moves
+  news macro-F1 by up to 3.2 pp, so the gaps between SinLlama variants are noise.
+- The `assert_eager` docstrings in `benchmark/mmlu/evaluate_{sinhala,english}_mmlu.py` give
+  47.27 / 41.33 for `SinLlama_cpt`. Those are the scores of `SinLlama_cpt_v02_new`.
+- The news-category prompt in `benchmark/downstream/finetune_news_category.py` lists the labels
+  in a different order from the one the data actually uses. 4 of the 5 classes are mislabelled.
+- `sft/config.yaml` still refers to `gs://sinllama-cpt` (hyphen). The bucket is `sinllama_cpt`.
+- `results/latex/Downstream_Tasks.tex` copies the SinLlama paper's Table III rows without saying so.
+- Global-PIQA still loads models with SDPA attention.
+- `evaluate_english_mmlu.py` has no memory cap on batch × sequence².
+- With a mapping `data.eval_file` (as in `wikipedia_sft/config_v2.yaml`), `sft/run_sft_uc.py`
+  logs the second eval set's metrics (`eval_uc_*`) only to W&B, not to the text log.
+- The 100-prompt judge comparison is one sampled answer per prompt from a single judge. The
+  v2-vs-UC_Gen gap (+0.33) needs several samples per prompt before it can be confirmed.
+- Evaluation gaps (HellaSwag is out of scope):
+  - **No permuted English MMLU** for `SinLlama_UC_Gen_Model` or `SinLlama_wiki_clean`. Their
+    permuted Sinhala arms were scored on the lab box in phase 16. `SinLlama_wiki_uc_gen_mix` has
+    both languages (phases 16 and 19).
+  - **No 100-prompt judge** for `uc_instruct_cleaned`, `wiki`, `Bactrianx_Instruct`,
+    `textbook_mix` or `instruct_mix`.
+  - **`uc_instruct` (raw corpus)** has MMLU and PIQA data but no downstream probes or judge, and
+    is not in the reports.
+
+## 2026-11-19 – 11-24: Bilingual instruction mix (phase 19)
+
+### Added
+- The **`SinLlama_instruct_mix`** model, the first SinLlama model that answers
+  questions about images. It was trained and benchmarked on the 16 GB RTX 4070 Ti SUPER lab machine.
+  - **Data** (`instruct_sft/build_instruct_mix.py`, `7a86e5f`): 355,259 training rows and 147.8M tokens,
+    exactly 75 % Sinhala / 25 % English by tokens, with a 1,600-row validation set split by source.
+    Sources:
+    - COCO train2017 VQA: the first 100k of its 118,287 images (99,693 training rows per
+      language), Qwen English answers plus their NLLB Sinhala translations, with the looping
+      rows repaired;
+    - UltraChat in Sinhala and English;
+    - Aya Dataset and Aya Collection, with the NLLB ZWJ spelling artifacts repaired;
+    - LKValues.
+  - **Training** (`instruct_sft/train_instruct.py`, `run_instruct.sh`, `80944ec`):
+    - QLoRA r64 / α16 on all 7 projections of `SinLlama_wiki_uc_gen_mix`: 1 epoch, 10,069 steps,
+      LR 2e-4 cosine, loss on the answers only.
+    - It survived two lab-box power losses through an `@reboot` resume hook and checkpoints every
+      100 steps; the GPU is now capped at 220 W.
+    - Early stopping (patience 4) never triggered. The best eval loss was 1.418, at step 10,000.
+  - **Weights** (Google Drive, not GCS):
+    - merged bf16 model in `gdrive:sinllama_cpt/SinLlama_instruct_mix/`;
+    - adapter in `gdrive:sinllama_cpt/vqa-early-stopping/best_step10000_no_early_stop/`.
+  - **Benchmarks** (`instruct_sft/bench/`, `58b1701`; lab-box evaluators in `tb_eval/`, `327f653`):
+    - Every number is against its parent `SinLlama_wiki_uc_gen_mix`, re-scored on the same machine,
+      with paired tests.
+    - **COCO VQA** (Qwen judge, out of 100, `ddbe3d3`):
+      - English 88.07, against 76.65 zero-shot and 81.89 for the VQA-only fine-tune
+        (+6.18 over the fine-tune, p = 2e-15).
+      - Sinhala 60.68, against 37.11 and 51.41 (+9.27 over the fine-tune, p = 1e-10).
+    - **SinhalaMMLU:** 37.07 % raw / 40.32 % permuted, which is −1.57 pp (p = 7e-4) and
+      −1.12 pp (p = 0.008).
+    - **English MMLU:** 50.31 % raw / 53.60 % permuted, which is −1.84 pp (p = 1.2e-9) and
+      −1.37 pp (p = 1.5e-7). The raw score has more option-A bias (TVD to gold 14.2 vs 7.2 pp).
+    - **Open-book SinhalaMMLU:** 37.16 % closed book and 46.12 % with bge-m3 top-3 retrieval,
+      about −1.5 pp in both settings.
+    - **Belebele:** Sinhala with the passage 71.1 % permuted, −2.6 pp (p = 0.013). The other three
+      splits are not significant.
+    - **XL-Sum and M2DS:** ROUGE and BERTScore level with the parent in Sinhala and English
+      (no significant difference).
+    - **Downstream probes** (4-bit QLoRA, macro-F1): writing 98.04 / news 91.05 / sentiment 79.94,
+      against the parent's 97.66 / 91.37 / 79.46, which is within ±5 test items.
+    - Global-PIQA and the Gemini 100-prompt judge were not run.
+  - **Reports:** the model is added to `results/latex/` and `results/pdf/`:
+    - a new section each in `VQA_Benchmark` and `MMLU_Debiased` (Appendices B and C);
+    - rows in `Belebele`, `XLSum_Summarization`, `M2DS_Summarization` and `Downstream_Tasks`;
+    - a column in `MMLU_Benchmark`;
+    - a node in the model tree, a table column and the weights' location in `Model_Comparison`.
+
+    The raw predictions are in `results/data/instruct_mix_lab_4070ti_20261122/`.
+  - **`results/latex/Instruct_Mix_Results`**: the model, its parent, `SinLlama_v01` and llama-3-8b
+    side by side on every benchmark, with a sources table.
+- `tb_eval/mmlu16_fixed.py`: English MMLU on the 16 GB lab box. It runs `permute_eval.py` with the
+  memory fixes from `tb_eval/rag/rag_eval.py`:
+  - the embedding lookup runs on the CPU;
+  - the out-of-memory retry runs outside the `except` block;
+  - a single item that still runs out of memory is re-scored at 768 tokens and counted on a
+    `FALLBACK` line (`ebc01ad`).
+- `instruct_sft/bench/bench_chain2.sh`: the English MMLU rerun for `SinLlama_instruct_mix` and its
+  parent with `mmlu16_fixed.py`. It waits for `bench_chain.sh` to finish (`ebc01ad`).
+- `instruct_sft/bench/upload_merged.sh`: uploads the merged model to Drive and retries until
+  `rclone check` reports 0 differences (`6626e3d`).
+
+### Fixed
+- `instruct_sft/on_reboot.sh` checks only the last line of the benchmark-chain logs. The logs keep
+  the `CHAIN_DONE` lines of earlier passes, so a reboot would not have restarted an unfinished chain.
+  The hook now also restarts `bench_chain2.sh` (`4a98b0b`).
+- `instruct_sft/bench/downstream_job.sh` evaluates with batch 2 (`EVAL_BS`). The config's batch 16
+  builds 16 × 512 × 139k fp32 logits and ran out of memory at the first evaluation. The batch size
+  changes only memory use, not the loss or the predictions (`4a98b0b`).
+- `VQA_Benchmark` said the mix used 118k train2017 images and about 30× more VQA data than the
+  3,994-row fine-tune. It used the first 100k images, so about 25×.
+
+## 2026-11-04 – 11-22: COCO visual question answering (phase 18)
+
+### Added
+- **A COCO val2017 VQA set** (`VQA/`, `30c376b`; documented in `docs/vqa-dataset.md`):
+  - **English:** for each of the 5,000 images, Qwen3.5-9B (llama.cpp, grounded by the image's 5 COCO
+    captions) writes a description, a question for 17–18-year-old students, and its answer.
+  - **Sinhala:** NLLB-200 3.3B translates it sentence by sentence. Three post-processing steps fix
+    NLLB's failure modes:
+    - `repair_nllb.py`: dropped clauses, loops, and a "picture on page 23" hallucination on about
+      14 % of sentences;
+    - `postprocess_si.py`: rare Sinhala letters NLLB leaves out, and doubled punctuation;
+    - `sinhala_normalize.py`: lost ZWJ conjuncts.
+
+    The final file has 0 page hallucinations, 0 loops and 0 unresolved sentences.
+- **A VQA benchmark for SinLlama** (`VQA/sinllama_vqa_eval/`, `1ddb61b`):
+  - The model gets the description and the question and writes an answer. Sinhala answers are
+    translated back to English with NLLB.
+  - Qwen3.5-9B judges each answer against the reference on four criteria, weighted 0.25 / 0.35 /
+    0.25 / 0.15, for a score out of 100.
+  - `SinLlama_wiki_uc_gen_mix` zero-shot: English 75.97, Sinhala 38.43. 5-shot doubles the answer
+    length but does not help: 75.69 / 39.07.
+- **Per-language VQA QLoRA fine-tunes** (`ft_vqa.py`, `run_ft.sh`, `2cfab0c`):
+  - 3,994 / 500 / 500 split by image; r8; best checkpoint at step 120.
+  - On the 500 test images: English 81.89 vs 76.65 zero-shot (p = 2e-8); Sinhala 51.41 vs 37.11
+    (p = 6e-17).
+  - The adapters are in Drive `sinllama_cpt/SinLlama_wiki_uc_gen_mix_vqa_adapters/`.
+  - The fine-tune tables are in `VQA_Benchmark` (`e344e5f`).
+- **COCO train2017 VQA** (`VQA/train2017/`, `83abc6f`): the same pipeline in 10k-image chunks on the
+  lab box.
+  - It was stopped after 100k images, when a kernel update left the machine without its GPU driver
+    (2026-11-11).
+  - `scan_loops.py` and `fix_loops.py` found 142 looping records. They regenerated or re-translated
+    135 and dropped 7.
+  - The 100k set is in Drive `VQA_full/` and is the VQA part of the phase-19 instruction mix.
+- New NLLB options, all off by default so the val2017 build still reproduces (`140ea58`, `8313e87`):
+  - `translate_nllb.py --nopunct-first --logprob`;
+  - `postprocess_si.py --fix-split-hal`;
+  - `repair_nllb.py --long-loops`, which catches loops of 4–10-word units.
+
+### Known issues
+- The judge model, Qwen3.5-9B, also wrote the reference answers, so the judge may favour answers
+  like its own.
+- The zero-shot and 5-shot VQA runs used the older prompt wording ("image description"). The
+  fine-tunes use the current wording.
+
+## 2026-10-30 – 11-04: Summarization benchmarks (phase 17)
+
+### Added
+- **XL-Sum** (`xlsum_eval/`, scoring and report scripts in `results/data/xlsum_lab_4070ti_20261030/scripts/`;
+  `51abba4`):
+  - **Setup:** a QLoRA r16 fine-tune per model on the lab box (best checkpoint by validation loss,
+    beam 4).
+  - **Data:** the Sinhala split (3,249 / 500 / 500) and a seed-42 English sample of the same size.
+  - **Metrics:** ROUGE, and BERTScore with HelaBERT_Large for Sinhala and RoBERTa-large for English.
+  - **Sinhala ROUGE-1/2/L:**
+    - llama-3-8b 24.89 / 11.48 / 22.08;
+    - `SinLlama_v01` 28.54 / 14.74 / 25.35, which beats XL-Sum's mT5 (27.29 / 13.38 / 23.47);
+    - `wiki_uc_gen_mix` 28.43 / 14.10 / 25.04;
+    - `textbook_mix` 28.26 / 13.94 / 24.76.
+  - **English ROUGE-1:** llama-3-8b leads (41.36) and the SinLlama models score 37.0–37.8. That gap
+    of about −4 is the English cost of the Sinhala CPT.
+  - The SinLlama variants do not differ significantly from one another in either language.
+- **M2DS multi-document summarization** (`m2ds_eval/`, `6bf3aef`):
+  - **The official splits leak.** 72.6 % of the Sinhala test articles are also in the training set,
+    and a model trained on them reaches ROUGE-1 45.57 by memorising them.
+  - **`m2ds_dedup.py` removes the overlap.** It drops every training cluster that shares an article
+    or a summary sentence with validation or test. That leaves 2,396 / 4,942 training clusters in
+    Sinhala and 10,670 / 13,496 in English.
+  - **The English scores strip a BBC promo line.** 812 of 1,687 English test references end with it.
+  - **Sinhala ROUGE-1:** llama-3-8b 22.06, `SinLlama_v01` 24.46, `wiki_uc_gen_mix` 23.78.
+  - **English ROUGE-1:** llama-3-8b 49.79, `SinLlama_v01` 46.39, `wiki_uc_gen_mix` 46.56.
+- Reports `results/latex/XLSum_Summarization` and `M2DS_Summarization`.
+
+### Fixed
+- XL-Sum decoding no longer blocks repeated n-grams. With a decoder-only model,
+  `no_repeat_ngram_size=2` also counts the prompt, so the model could not copy any word pair from
+  the article. The first Sinhala runs are invalid, are kept as `*_INVALID`, and were decoded again.
+
+### Changed
+- The GCP project, and with it `gs://sinllama_cpt`, was deleted on 2026-11-02 when its credits ran
+  out. The lab-box chains now fetch models from the Google Drive backup with `rclone`.
+
+## 2026-10-24 – 10-26: Lab-box evaluation (phase 16)
+
+### Added
+- **Evaluators that fit the 16 GB RTX 4070 Ti SUPER lab machine** (`tb_eval/`, committed in `327f653`):
+  - `permute_16gb.py`: SinhalaMMLU raw and permuted, with the `lm_head` on the CPU;
+  - `belebele/`: Belebele;
+  - `rag/`: open-book SinhalaMMLU.
+
+  Every row of `MMLU_Debiased` Appendix B was re-scored on this machine. `SinLlama_wiki` re-scored
+  there drifts from its MI300X run (permuted +0.43 pp, p = 0.015), so lab and pod rows are not mixed.
+- **Permuted SinhalaMMLU:**
+  - `textbook_mix` 38.61 / 41.58 against its parent's 38.67 / 41.44, not significant.
+  - `google/gemma-4-E4B-it` 37.74 / 41.55.
+  - Gemma with a textbook LoRA 38.31 / 42.35, still not significant against the base.
+
+  So about 41.5 % looks like a capacity ceiling for models this size, not a gap in SinLlama's data.
+- **Open-book SinhalaMMLU (`MMLU_Debiased` Appendix C, `RAG_Subject_Breakdown`):**
+  - **Setup:** bge-m3 retrieves the top 3 of 33,090 textbook passages for each question.
+  - **`wiki_uc_gen_mix`:** 38.59 % → 47.66 % (+9.07 pp, p = 8e-58). The gain comes from grade 6–11
+    questions whose subject has a textbook (+15.7 pp). Retrieving with HelaBERT_Large instead of
+    bge-m3 gives 39.40 %, not significant.
+  - **`textbook_mix`:** 38.72 % → 46.74 %.
+- **Belebele** (`results/latex/Belebele`). Permuted accuracy for Sinhala with the passage:
+  llama-3-8b 53.3, `SinLlama_v01` 66.7, `wiki_uc_gen_mix` 73.6, `textbook_mix` 72.6.
+
+### Fixed
+- `rag_eval.py` retries an out-of-memory error outside the `except` block. Retrying inside it, as
+  `permute_eval.py` does, cascaded and left about 4,300 items unscored.
+- Coverage is split by subject and by level. The corpus stops at grade 11, so A/L questions count as
+  having no textbook even when their subject has one.
+
+## 2026-10-21 – 10-30: School textbooks (phase 15)
+
+### Added
+- **The Sinhala textbook corpus** (`textbooks/`, `be1065a`, `2d17bc5`):
+  - **Source:** 113 Sinhala-medium government textbooks for grades 6–11, from edupub.gov.lk,
+    converted to Markdown (about 18.9M characters).
+  - **Extraction:**
+    - arts books are rule-based;
+    - technical books use rules plus a local Qwen3.5-9B vision model, on maths and science
+      fraction pages only.
+  - **Not extracted:** the scanned books, which still need OCR.
+- **The textbook SFT pipeline** (`textbook_sft/`, `811e82a`, `5f5b83e`, `17aa8bc`):
+  - **Data:** 13,180 textbook rows plus 1,988 cleaned UltraChat replay rows, at equal token counts.
+  - **Validator:** checks for leakage across sources.
+  - **`docs/lora-hyperparameters.md`.**
+- **The `SinLlama_textbook_mix` model** (registered in `benchmark/main.yml`, `b6915ba`):
+  - **Training:** LoRA r8 on `wiki_uc_gen_mix`, on an A40. It stopped early, with the best
+    checkpoint at step 500.
+  - **MMLU:** Sinhala 38.63 % (p = 0.70 against the parent) and English 50.63 % (−1.45 pp,
+    p = 2.3e-8).
+  - **Downstream macro-F1:** writing 97.77 / news 90.78 / sentiment 79.72.
+  - **Answer-position bias grew:** Sinhala TVD 12.7 → 15.5 pp.
+- **The `SinLlama_textbook_cpt` model** (`textbook_cpt/`, `add7e6a`): plain causal-LM LoRA on the
+  textbooks only, LR 1e-4 for 5 epochs.
+  - SinhalaMMLU 36.22 %, −2.59 pp against the parent (p = 5.7e-6). Its answers lean to option 3.
+  - The English MMLU run and the downstream probes were stopped.
+- **Other evaluators:**
+  - `benchmark/mmlu/eval_hf_model_on_pod.py` (`46b968b`) scores a Hugging Face Hub model on
+    SinhalaMMLU on a remote pod.
+  - `eval_sinhalalm_custom.py` (`2795eb7`) scores HelaAI's 512-token SinhalaLM.
+  - `inference/100_prompts_q_and_a/gen_question.py` (`6a036a9`) writes the reverse questions for the
+    judge.
+  - 8-bit loading in `evaluate_sinhala_mmlu.py` and `generate_sinhala_mmlu.py` (`c885141`).
+
+### Known issues
+- SinhalaMMLU is built from grade 6–11 term tests on the same curriculum as the textbooks:
+  - 31 of 7,044 questions have at least 50 % 6-gram overlap with the corpus;
+  - 252 have some overlap.
+
+  At the user's request only the standard benchmark is reported, with no decontaminated subset.
+
+## 2026-10-15 – 10-20: Wikipedia SFT v2 and the LLM judge (phase 14)
 
 ### Added
 - `inference/judge_gemini.py`: an LLM judge (Gemini) that scores generated answers 1–10 on
@@ -98,33 +366,6 @@ the change. Model names refer to the merged weights in `gs://sinllama_cpt`.
     UC_Gen puts 38.2 % of its answers on option 1 (TVD 16.0 pp; 85 and 87 of 92 on non-parallel
     PIQA). Every stage-3 child lowers that bias (TVD 11.6–12.7 pp). Earlier text had compared the
     children with `uc_instruct_cleaned`, two stages back.
-
-### Known issues
-These were found while writing `docs/research-history.md` (§2) and have not been fixed in the repo yet:
-- `docs/benchmark-report.md` and `inference/models.yml` present `SinLlama_v02` as a base/CPT
-  checkpoint. It is v01 plus a short MMLU-format SFT, so part of its MMLU lead is format learning.
-- `benchmark/results/prior_2026-08-01/` holds results from a 2026-08-09/10 run, not 08-01.
-- The downstream tables report single runs. Repeating a run with the same config and seed moves
-  news macro-F1 by up to 3.2 pp, so the gaps between SinLlama variants are noise.
-- The `assert_eager` docstrings in `benchmark/mmlu/evaluate_{sinhala,english}_mmlu.py` give
-  47.27 / 41.33 for `SinLlama_cpt`. Those are the scores of `SinLlama_cpt_v02_new`.
-- The news-category prompt in `benchmark/downstream/finetune_news_category.py` lists the labels
-  in a different order from the one the data actually uses. 4 of the 5 classes are mislabelled.
-- `sft/config.yaml` still refers to `gs://sinllama-cpt` (hyphen). The bucket is `sinllama_cpt`.
-- `results/latex/Downstream_Tasks.tex` copies the SinLlama paper's Table III rows without saying so.
-- Global-PIQA still loads models with SDPA attention.
-- `evaluate_english_mmlu.py` has no memory cap on batch × sequence².
-- With a mapping `data.eval_file` (as in `wikipedia_sft/config_v2.yaml`), `sft/run_sft_uc.py`
-  logs the second eval set's metrics (`eval_uc_*`) only to W&B, not to the text log.
-- The 100-prompt judge comparison is one sampled answer per prompt from a single judge. The
-  v2-vs-UC_Gen gap (+0.33) needs several samples per prompt before it can be confirmed.
-- Evaluation gaps (HellaSwag is out of scope):
-  - **No debiased (permuted) MMLU** for `SinLlama_UC_Gen_Model` (calibrated arm only),
-    `SinLlama_wiki_clean` (its Sinhala arm is in GCS `results_29_09_2026/` but not reported;
-    English failed) or `SinLlama_wiki_uc_gen_mix`.
-  - **No 100-prompt judge** for `uc_instruct_cleaned`, `wiki` or `Bactrianx_Instruct`.
-  - **`uc_instruct` (raw corpus)** has MMLU and PIQA data but no downstream probes or judge, and
-    is not in the reports.
 
 ## 2026-09-29: Wrap-up runs (phase 13)
 
