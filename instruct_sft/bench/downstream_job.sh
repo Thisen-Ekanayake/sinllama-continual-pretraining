@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One downstream LoRA probe (benchmark/downstream recipe, config.yml hyper-parameters) on the 16 GB lab box:
 # the only change is --load_in_4bit (bf16 LoRA on an 8B model needs the 48 GB A40 it ran on before).
-# If the configured micro-batch OOMs, the micro-batch is halved and grad-accum doubled (same effective batch).
+# Eval batch is 2 (config 16 builds 16x512x139k fp32 logits: OOM at the first eval; it only changes memory, not
+# the loss or predictions). If the configured training micro-batch OOMs, the micro-batch is halved and grad-accum doubled (same effective batch).
 #   downstream_job.sh <news|sentiment|writing> <model name under models/>
 set -uo pipefail
 T=$1; NAME=$2
@@ -20,7 +21,7 @@ for try in 1 2 3; do
       --output_dir $OUT --results_file $OUT/$(y $T.results_file) --max_seq_length $(y $T.max_seq_length) \
       --lora_rank $(y $T.lora_rank) --lora_alpha $(y $T.lora_alpha) --lora_dropout $(y $T.lora_dropout) \
       --lora_target_modules $(y $T.lora_target_modules) --num_train_epochs $(y $T.epochs) --learning_rate $(y $T.lr) \
-      --per_device_train_batch_size $BS --per_device_eval_batch_size $(y $T.eval_batch_size) \
+      --per_device_train_batch_size $BS --per_device_eval_batch_size ${EVAL_BS:-2} \
       --gradient_accumulation_steps $ACC --warmup_ratio $(y $T.warmup_ratio) --weight_decay $(y $T.weight_decay) \
       --logging_steps $(y $T.logging_steps) --eval_steps $(y $T.eval_steps) --save_steps $(y $T.save_steps) \
       --save_total_limit $(y $T.save_total_limit) --seed $(y $T.seed) --run_name $T-lora-$NAME --load_in_4bit \

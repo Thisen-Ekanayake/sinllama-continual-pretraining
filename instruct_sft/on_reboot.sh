@@ -19,7 +19,11 @@ if [ ! -e "$OUT/UPLOAD_DONE" ] && ! pgrep -f upload_adapters.sh > /dev/null; the
   OUT=$OUT setsid nohup ./upload_adapters.sh >> "$OUT.upload.log" 2>&1 < /dev/null &
 fi
 # benchmark chain (bench/bench_chain.sh, flock-guarded; it waits for training itself)
-if [ -x ~/bench_mix/bench_chain.sh ] && ! grep -q CHAIN_DONE ~/bench_mix/chain.log 2>/dev/null; then
+# (last line only: the log keeps CHAIN_DONE lines of earlier passes)
+if [ -x ~/bench_mix/bench_chain.sh ] && ! tail -1 ~/bench_mix/chain.log 2>/dev/null | grep -q CHAIN_DONE; then
   echo "$(date) restarting benchmark chain"
   setsid nohup ~/bench_mix/bench_chain.sh >> ~/bench_mix/chain.log 2>&1 < /dev/null &
+fi
+if [ -x ~/bench_mix/bench_chain2.sh ] && ! tail -1 ~/bench_mix/chain2.log 2>/dev/null | grep -q CHAIN2_DONE; then
+  setsid nohup ~/bench_mix/bench_chain2.sh >> ~/bench_mix/chain2.log 2>&1 < /dev/null &
 fi
