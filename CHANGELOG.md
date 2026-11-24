@@ -90,10 +90,14 @@ writing `docs/research-history.md` (§2).
       (no significant difference).
     - **Downstream probes** (4-bit QLoRA, macro-F1): writing 98.04 / news 91.05 / sentiment 79.94,
       against the parent's 97.66 / 91.37 / 79.46, which is within ±5 test items.
-    - Global-PIQA and the Gemini 100-prompt judge were not run.
+    - **Global-PIQA** (8-shot, raw, 2026-11-24): average of the 4 splits 51.69 %, against 50.32 % for the
+      parent re-scored on the same machine (372 of its 374 items match its A40 run). No split
+      differs significantly (exact McNemar, p ≥ 0.13).
+    - The Gemini 100-prompt judge was not run.
   - **Reports:** the model is added to `results/latex/` and `results/pdf/`:
     - a new section each in `VQA_Benchmark` and `MMLU_Debiased` (Appendices B and C);
-    - rows in `Belebele`, `XLSum_Summarization`, `M2DS_Summarization` and `Downstream_Tasks`;
+    - rows in `Belebele`, `MRL_Benchmarks`, `XLSum_Summarization`, `M2DS_Summarization` and
+      `Downstream_Tasks`;
     - a column in `MMLU_Benchmark`;
     - a node in the model tree, a table column and the weights' location in `Model_Comparison`.
 
@@ -110,6 +114,8 @@ writing `docs/research-history.md` (§2).
   parent with `mmlu16_fixed.py`. It waits for `bench_chain.sh` to finish (`ebc01ad`).
 - `instruct_sft/bench/upload_merged.sh`: uploads the merged model to Drive and retries until
   `rclone check` reports 0 differences (`6626e3d`).
+- `instruct_sft/bench/piqa_job.sh`: Global-PIQA for the model and its parent on the lab box, through
+  `piqa_16gb.py` with the `mrlbenchmarks/config.yml` settings.
 
 ### Fixed
 - `instruct_sft/on_reboot.sh` checks only the last line of the benchmark-chain logs. The logs keep
